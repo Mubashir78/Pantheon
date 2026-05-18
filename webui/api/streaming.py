@@ -2504,6 +2504,16 @@ def _run_agent_streaming(
             # Pass personality via ephemeral_system_prompt (agent's own mechanism)
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
+            # Auto-load SOUL.md as system prompt when no personality configured
+            if not getattr(agent, 'ephemeral_system_prompt', None):
+                try:
+                    from api.profiles import get_active_hermes_home
+                    soul_path = os.path.join(str(get_active_hermes_home()), 'SOUL.md')
+                    if os.path.isfile(soul_path):
+                        with open(soul_path, 'r', encoding='utf-8') as _sf:
+                            agent.ephemeral_system_prompt = _sf.read().strip()
+                except Exception:
+                    pass
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent
