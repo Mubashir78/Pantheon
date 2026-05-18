@@ -69,7 +69,32 @@
     });
   }
 
+  // ── God Profile Chip (in composer) ──
+  var activeGod = 'Pantheon';
+  function updateProfileChip(name) {
+    activeGod = name;
+    var chip = document.getElementById('god-profile-chip');
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.id = 'god-profile-chip';
+      chip.style.cssText = 'position:fixed;bottom:70px;left:68px;z-index:500;display:flex;align-items:center;gap:8px;background:var(--bg-secondary,#11100E);border:1px solid var(--border,#3B4A50);border-radius:8px;padding:5px 12px;font-size:12px;color:var(--text-secondary,#C6AC8F);font-family:system-ui,sans-serif;font-weight:500;cursor:pointer;transition:border-color 0.2s';
+      chip.title = 'Active god — click to switch';
+      chip.onclick = function() {
+        // Open god management if available, else reload god rail
+        var gmPanel = document.getElementById('god-management-panel');
+        if (gmPanel && window.mountGodManagement) {
+          gmPanel.style.display = 'block';
+          window.mountGodManagement(gmPanel);
+        }
+      };
+      document.body.appendChild(chip);
+    }
+    chip.innerHTML = '<span style="width:8px;height:8px;border-radius:50%;background:var(--success,#86C08B)"></span>' + name;
+  }
+
   function switchGod(godName) {
+    activeGod = godName;
+    updateProfileChip(godName);
     // Switch profile via API
     fetch(API_BASE + '/api/profile/enter?name=' + encodeURIComponent(godName))
       .then(r => {
