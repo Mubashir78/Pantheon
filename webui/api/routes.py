@@ -8388,6 +8388,12 @@ def _handle_chat_start(handler, body):
                 del SESSIONS[old_sid]
             SESSIONS[s.session_id] = s
             SESSIONS.move_to_end(s.session_id)
+    # Store the cookie-based Hermes profile name on the session so
+    # streaming can load the correct SOUL.md (not just process-global default).
+    from api.helpers import get_profile_cookie
+    cookie_profile = get_profile_cookie(handler)
+    if cookie_profile:
+        s.hermes_profile = cookie_profile
     requested_profile = str(body.get("profile") or "").strip()
     if requested_profile:
         try:

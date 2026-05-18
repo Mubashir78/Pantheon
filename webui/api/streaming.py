@@ -2507,8 +2507,11 @@ def _run_agent_streaming(
             # Auto-load SOUL.md as system prompt when no personality configured
             if not getattr(agent, 'ephemeral_system_prompt', None):
                 try:
-                    from api.profiles import get_active_hermes_home
-                    soul_path = os.path.join(str(get_active_hermes_home()), 'SOUL.md')
+                    from api.profiles import _resolve_profile_home_for_name, get_active_hermes_home
+                    # Use session's Hermes profile if set (cookie-based), fallback to default
+                    _hp = getattr(s, 'hermes_profile', None)
+                    _home = _resolve_profile_home_for_name(_hp) if _hp else get_active_hermes_home()
+                    soul_path = os.path.join(str(_home), 'SOUL.md')
                     if os.path.isfile(soul_path):
                         with open(soul_path, 'r', encoding='utf-8') as _sf:
                             agent.ephemeral_system_prompt = _sf.read().strip()
