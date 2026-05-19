@@ -45,12 +45,13 @@
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
-    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
+    overscroll-behavior: none;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
-  .app-wrapper { display: flex; flex-direction: column; height: 100vh; }
+  .app-wrapper { display: flex; flex-direction: column; height: 100dvh; }
   .app { display: flex; flex: 1; min-height: 0; position: relative; }
 
   /* ── Ambient background: 3 drifting gradients + vignette + noise ── */
@@ -3599,5 +3600,104 @@ steer(input);}else{isPaused?sendInterjection(input):_sendMessage(input);}}},plac
 <script src="/static/boon-promoter.js"></script>
 <div id="god-management-panel" style="display:none;position:fixed;inset:0;z-index:900;background:var(--bg-primary,#0a0908);overflow-y:auto;"></div>
 <div id="athenaeum-panel" style="display:none;position:fixed;inset:0;z-index:900;background:var(--bg-primary,#0a0908);overflow-y:auto;"></div>
+<!-- Mobile keyboard reliability fix -- loaded at end so it overrides React-injected styles -->
+<style id="pantheon-mobile-keyboard-fix">
+  body { height: 100dvh !important; overflow: hidden !important; overscroll-behavior: none !important; }
+  .app-wrapper { height: 100dvh !important; min-height: 0 !important; }
+  .app { min-height: 0 !important; }
+  .header { position: sticky !important; top: 0 !important; z-index: 100 !important; flex-shrink: 0 !important; }
+  .input-area { position: sticky !important; bottom: 0 !important; z-index: 100 !important; flex-shrink: 0 !important; }
+  .messages { flex: 1 1 auto !important; overflow-y: auto !important; min-height: 0 !important; }
+  .floating-sidebar-btn { position: fixed !important; top: 10px !important; left: 10px !important; z-index: 150 !important; }
+  @media (max-width: 480px) {
+    body.pantheon-composer-focused .app,
+    body.pantheon-keyboard-open .app {
+      padding-bottom: 0 !important;
+    }
+    body.pantheon-composer-focused .mobile-bottom-nav,
+    body.pantheon-keyboard-open .mobile-bottom-nav {
+      display: none !important;
+      pointer-events: none !important;
+    }
+    body.pantheon-composer-focused .main,
+    body.pantheon-keyboard-open .main {
+      min-height: 0 !important;
+    }
+  }
+  @supports selector(body:has(.input-area textarea:focus)) {
+    @media (max-width: 480px) {
+      body:has(.input-area textarea:focus) .app {
+        padding-bottom: 0 !important;
+      }
+      body:has(.input-area textarea:focus) .mobile-bottom-nav {
+        display: none !important;
+        pointer-events: none !important;
+      }
+    }
+  }
+</style>
+<script id="pantheon-mobile-keyboard-fix-script">
+(function () {
+  'use strict';
+  if (window.__pantheonMobileKeyboardFixInstalled) return;
+  window.__pantheonMobileKeyboardFixInstalled = true;
+
+  var MOBILE_QUERY = '(max-width: 480px)';
+  var KEYBOARD_MIN_DROP = 90;
+  var KEYBOARD_RATIO = 0.82;
+
+  function isMobileLayout() {
+    return window.matchMedia ? window.matchMedia(MOBILE_QUERY).matches : window.innerWidth <= 480;
+  }
+
+  function isComposerTarget(el) {
+    return !!(el && el.matches && (
+      el.matches('.input-area textarea, .input-area input, .input-area [contenteditable="true"]') ||
+      (el.closest && !!el.closest('.input-area'))
+    ));
+  }
+
+  function visualKeyboardOpen() {
+    if (!isMobileLayout() || !window.visualViewport) return false;
+    var vv = window.visualViewport;
+    var drop = window.innerHeight - vv.height;
+    return drop > KEYBOARD_MIN_DROP || vv.height < window.innerHeight * KEYBOARD_RATIO || vv.offsetTop > 0;
+  }
+
+  function syncMobileKeyboardState() {
+    if (!document.body) return;
+    var mobile = isMobileLayout();
+    var composerFocused = mobile && isComposerTarget(document.activeElement);
+    var keyboardOpen = mobile && visualKeyboardOpen();
+    document.body.classList.toggle('pantheon-composer-focused', composerFocused);
+    document.body.classList.toggle('pantheon-keyboard-open', keyboardOpen);
+    if (window.visualViewport && document.documentElement) {
+      document.documentElement.style.setProperty(
+        '--pantheon-visual-viewport-height',
+        Math.round(window.visualViewport.height) + 'px'
+      );
+    }
+  }
+
+  function scheduleSync() {
+    if (window.requestAnimationFrame) window.requestAnimationFrame(syncMobileKeyboardState);
+    else setTimeout(syncMobileKeyboardState, 0);
+    setTimeout(syncMobileKeyboardState, 60);
+    setTimeout(syncMobileKeyboardState, 180);
+  }
+
+  document.addEventListener('focusin', scheduleSync, true);
+  document.addEventListener('focusout', scheduleSync, true);
+  document.addEventListener('visibilitychange', scheduleSync);
+  window.addEventListener('resize', scheduleSync, { passive: true });
+  window.addEventListener('orientationchange', scheduleSync);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', scheduleSync, { passive: true });
+    window.visualViewport.addEventListener('scroll', scheduleSync, { passive: true });
+  }
+  window.__pantheonMobileKeyboardSync = scheduleSync;
+  scheduleSync();
+})();
+</script>
 </body>
 </html>
