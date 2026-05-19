@@ -98,35 +98,56 @@
       els.badge.textContent = count;
       els.badge.style.display = count > 0 ? 'flex' : 'none';
     }
-    if (!state.open || !els.panel) return;
+    if (!state.open || !els.list) return;
 
-    els.panel.innerHTML = '';
+    els.list.innerHTML = '';
     const list = state.notifications;
     if (!list.length) {
       const empty = document.createElement('div');
       empty.className = 'nb-empty';
       empty.textContent = 'No notifications';
-      els.panel.appendChild(empty);
+      els.list.appendChild(empty);
       return;
     }
-    list.forEach(n => els.panel.appendChild(renderNotification(n)));
+    list.forEach(n => els.list.appendChild(renderNotification(n)));
 
     const footer = document.createElement('div');
     footer.className = 'nb-footer';
     footer.innerHTML = '<button class="nb-clear-all">Clear all</button>';
-    els.panel.appendChild(footer);
+    els.list.appendChild(footer);
 
-    els.panel.querySelectorAll('[data-dismiss]').forEach(btn =>
+    els.list.querySelectorAll('[data-dismiss]').forEach(btn =>
       btn.addEventListener('click', e => { e.stopPropagation(); dismiss(btn.dataset.dismiss); }));
-    els.panel.querySelectorAll('[data-expand]').forEach(btn =>
+    els.list.querySelectorAll('[data-expand]').forEach(btn =>
       btn.addEventListener('click', e => { e.stopPropagation(); toggleExpand(btn.dataset.expand); }));
-    els.panel.querySelector('.nb-clear-all')?.addEventListener('click', clearAll);
+    els.list.querySelector('.nb-clear-all')?.addEventListener('click', clearAll);
   }
 
-  function togglePanel() {
+  function positionPanel() {
+    if (!els.panel || !els.btn) return;
+    const rect = els.btn.getBoundingClientRect();
+    const gap = 8;
+    const margin = 12;
+    const width = Math.min(360, Math.max(280, window.innerWidth - margin * 2));
+    const left = Math.max(margin, Math.min(window.innerWidth - width - margin, rect.right - width));
+    const top = Math.max(margin, rect.bottom + gap);
+    els.panel.style.width = width + 'px';
+    els.panel.style.left = left + 'px';
+    els.panel.style.right = 'auto';
+    els.panel.style.top = top + 'px';
+    els.panel.style.maxHeight = Math.max(180, window.innerHeight - top - margin) + 'px';
+  }
+
+  async function togglePanel() {
+    if (!els.panel) return;
     state.open = !state.open;
     els.panel.style.display = state.open ? 'flex' : 'none';
-    if (state.open) render();
+    if (state.open) {
+      positionPanel();
+      render();
+      await poll();
+      positionPanel();
+    }
   }
 
   function injectStyles() {
@@ -142,12 +163,12 @@
         display:flex; align-items:center; justify-content:center; padding:0 3px; pointer-events:none; }
       @keyframes nb-scale-pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.45)} }
       #nb-badge.nb-pulse { animation:nb-scale-pulse .4s ease; }
-      #nb-panel { position:absolute; top:calc(100% + 8px); right:0; width:340px; max-height:460px;
+      #nb-panel { position:fixed; top:60px; right:16px; width:min(360px, calc(100vw - 24px)); max-height:min(460px, calc(100dvh - 76px));
         background:var(--bg-secondary,#1e1e2e); border:1px solid var(--border,#333); border-radius:10px;
-        box-shadow:0 8px 32px rgba(0,0,0,.45); flex-direction:column; overflow:hidden; display:none; }
+        box-shadow:0 8px 32px rgba(0,0,0,.45); flex-direction:column; overflow:hidden; display:none; z-index:9500; }
       #nb-panel-header { padding:10px 14px; font-size:13px; font-weight:600; color:var(--text-secondary,#a6adc8);
         border-bottom:1px solid var(--border,#333); flex-shrink:0; }
-      .nb-list { overflow-y:auto; flex:1; }
+      .nb-list { overflow-y:auto; flex:1; min-height:0; }
       .nb-item { padding:10px 14px; border-bottom:1px solid var(--border,#333); cursor:default;
         transition:background .12s; }
       .nb-item:hover { background:var(--bg-primary,#181825); }
@@ -211,11 +232,18 @@
     setTimeout(tryInject, 1500);
     setTimeout(tryInject, 4000);
 
-    els = { badge: root.querySelector('#nb-badge'), panel: list, root };
+    els = { badge: btn.querySelector('#nb-badge'), panel, list, root, btn };
 
     btn.addEventListener('click', e => { e.stopPropagation(); togglePanel(); });
+    window.addEventListener('resize', () => { if (state.open) positionPanel(); }, { passive: true });
     document.addEventListener('click', e => {
-      if (state.open && !root.contains(e.target)) { state.open = false; panel.style.display = 'none'; }
+      const inside = (els.btn && els.btn.contains(e.target)) ||
+        (els.panel && els.panel.contains(e.target)) ||
+        (els.root && els.root.contains(e.target));
+      if (state.open && !inside) {
+        state.open = false;
+        if (els.panel) els.panel.style.display = 'none';
+      }
     });
 
     poll();
