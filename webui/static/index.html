@@ -27,11 +27,9 @@
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__&amp;t=__CACHE_BUST__">
 <style id="god-glow-base">
   /* ── GOD GLOW: base fallback (orange) ── */
-  .msg-row[data-role="assistant"] {
-    border-left: 4px solid #ff6600 !important;
-    padding-left: 8px !important;
-    background-image: linear-gradient(to right, rgba(255,102,0,0.18), rgba(255,102,0,0) 75%) !important;
-    background-color: transparent !important;
+  .assistant-turn .msg-body {
+    background: linear-gradient(to right, rgba(255,102,0,0.20), rgba(255,102,0,0) 75%) !important;
+    border-radius: 4px !important;
   }
   /* Safety: kill any accidental top border/line */
   body, html, header, .app-titlebar, .main, #messages, .messages, .layout {
@@ -1562,7 +1560,7 @@ cleanUp();
   var s=document.createElement('style');
   s.id='god-glow-override';
   s.type='text/css';
-  s.textContent='.msg-row[data-role="assistant"]{border-left:4px solid '+c+'!important;padding-left:8px!important;background-image:linear-gradient(to right,rgba('+r+','+g+','+b+',0.18),rgba('+r+','+g+','+b+',0) 75%)!important;background-color:transparent!important}';
+  s.textContent='.assistant-turn .msg-body{background:linear-gradient(to right,rgba('+r+','+g+','+b+',0.20),rgba('+r+','+g+','+b+',0) 75%)!important;border-radius:4px!important}';
   document.head.appendChild(s);
 })();
 </script>

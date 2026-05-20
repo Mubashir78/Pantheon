@@ -7180,11 +7180,9 @@ function _updateGodGlow() {
     const g = parseInt(c.slice(3,5), 16);
     const b = parseInt(c.slice(5,7), 16);
     styleEl.textContent =
-      '.msg-row[data-role="assistant"] {' +
-        'border-left: 4px solid ' + c + ' !important;' +
-        'padding-left: 8px !important;' +
-        'background-image: linear-gradient(to right, rgba(' + r + ',' + g + ',' + b + ',0.18), rgba(' + r + ',' + g + ',' + b + ',0) 75%) !important;' +
-        'background-color: transparent !important;' +
+    '.assistant-turn .msg-body {' +
+        'background: linear-gradient(to right, rgba(' + r + ',' + g + ',' + b + ',0.20), rgba(' + r + ',' + g + ',' + b + ',0) 75%) !important;' +
+        'border-radius: 4px !important;' +
       '}';
     console.log('[pantheon] God glow ON', profileName, c);
   } else {
