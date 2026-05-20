@@ -2940,6 +2940,40 @@ def _parse_ideas_sections(content):
     return sections
 
 
+def _canonical_idea_status(status):
+    """Normalize idea statuses without losing the human-facing label."""
+    raw = re.sub(r"\s+", " ", str(status or "").strip())
+    lowered = raw.lower()
+    if re.fullmatch(r"in progress(?: progress)*", lowered) or lowered == "in":
+        return "In Progress"
+    mapping = {
+        "idea": "Idea",
+        "backlog": "Backlog",
+        "done": "Done",
+        "on hold": "On Hold",
+        "hold": "On Hold",
+        "cancelled": "Cancelled",
+        "canceled": "Cancelled",
+    }
+    return mapping.get(lowered, raw)
+
+
+def _clean_idea_notes(notes):
+    """Strip metadata lines when an editor sends a full markdown entry body."""
+    cleaned = []
+    for line in str(notes or "").splitlines():
+        if re.match(r"^\s*-\s*\*\*(Status|Added):\*\*", line, flags=re.I):
+            continue
+        notes_match = re.match(r"^\s*-\s*\*\*Notes:\*\*\s*(.*)$", line, flags=re.I)
+        if notes_match:
+            note_text = notes_match.group(1).strip()
+            if note_text:
+                cleaned.append(note_text)
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -3983,6 +4017,13 @@ a:hover{{text-decoration:underline}}
         for p in profiles:
             god_md = p.get("god", {})
             name = p["name"]
+            is_god = p.get("is_god", bool(god_md))
+            hidden = p.get("hidden", god_md.get("hidden", False) if isinstance(god_md, dict) else False)
+            # Only show profiles that are actual Pantheon gods, skip hidden unless it's the default
+            if not is_god:
+                continue
+            if hidden and not p.get("is_default", False):
+                continue
             state = _get_god_state(name)
             gods.append({
                 "name": name,
@@ -5250,7 +5291,7 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, f"Could not resolve profile for '{god_name}'")
 
             meta = _read_god_metadata(god_home)
-            god_domain = meta.get("domain", "") or god_name
+            god_domain = body.get("domain", "").strip() or meta.get("domain", "") or god_name
 
             if action == "start":
                 result = forge_start(god_name, god_domain)
@@ -5267,7 +5308,10 @@ def handle_post(handler, parsed) -> bool:
                 soul_draft = body.get("soul_draft", "").strip()
                 if not soul_draft:
                     return bad(handler, "soul_draft field is required")
-                result = forge_accept(god_name, soul_draft, god_home, god_domain)
+                result = forge_accept(god_name, soul_draft, god_home, god_domain,
+                    icon=body.get("icon", ""),
+                    color=body.get("color", ""),
+                    display_name=body.get("display_name", ""))
                 return j(handler, result)
 
             else:
@@ -6219,7 +6263,7 @@ def handle_post(handler, parsed) -> bool:
         try:
             section_name = (body.get("section_name") or "").strip()
             entry_name = (body.get("entry_name") or "").strip()
-            new_status = (body.get("new_status") or "").strip().lower()
+            new_status = _canonical_idea_status(body.get("new_status") or "")
             if not section_name or not entry_name or not new_status:
                 return j(handler, {"error": "Missing required fields", "sections": []})
             ideas_path = os.path.expanduser("~/pantheon/project-ideas.md")
@@ -6238,7 +6282,7 @@ def handle_post(handler, parsed) -> bool:
                 elif line.startswith("### ") and in_section:
                     in_entry = line[4:].strip() == entry_name
                 if in_entry and "- **Status:**" in line:
-                    line = re.sub(r'-\s*\*\*Status:\*\*\s*\S+', f'- **Status:** {new_status}', line)
+                    line = re.sub(r'-\s*\*\*Status:\*\*\s*.+', f'- **Status:** {new_status}', line)
                     updated = True
                 new_lines.append(line)
             if not updated:
@@ -6389,7 +6433,7 @@ def handle_post(handler, parsed) -> bool:
         try:
             section_name = (body.get("section_name") or "").strip()
             entry_name = (body.get("entry_name") or "").strip()
-            notes = (body.get("notes") or "").strip()
+            notes = (body.get("notes") or body.get("body") or "").strip()
             if not section_name or not entry_name:
                 return j(handler, {"error": "Missing required fields (section_name, entry_name)", "sections": []})
             ideas_path = os.path.expanduser("~/pantheon/project-ideas.md")
@@ -6404,7 +6448,7 @@ def handle_post(handler, parsed) -> bool:
             from datetime import date
             today = date.today().strftime("%Y-%m-%d")
             entry_block = "\n### " + entry_name + "\n"
-            entry_block += "- **Status:** idea\n"
+            entry_block += "- **Status:** Idea\n"
             entry_block += "- **Added:** " + today + "\n"
             if notes:
                 entry_block += "- **Notes:** " + notes + "\n"
@@ -6430,8 +6474,8 @@ def handle_post(handler, parsed) -> bool:
             section_name = (body.get("section_name") or "").strip()
             entry_name = (body.get("entry_name") or "").strip()
             new_name = (body.get("new_name") or "").strip()
-            new_notes = (body.get("new_notes") or "").strip()
-            new_status = (body.get("new_status") or "").strip().lower()
+            new_notes = _clean_idea_notes(body.get("new_notes") or "")
+            new_status = _canonical_idea_status(body.get("new_status") or "")
             new_section = (body.get("new_section") or "").strip()
             if not section_name or not entry_name:
                 return j(handler, {"error": "Missing required fields", "sections": []})
@@ -6471,7 +6515,7 @@ def handle_post(handler, parsed) -> bool:
             today = date.today().strftime("%Y-%m-%d")
             final_name = new_name if new_name else entry_name
             entry_block = "\n### " + final_name + "\n"
-            entry_block += "- **Status:** " + (new_status if new_status else "idea") + "\n"
+            entry_block += "- **Status:** " + (new_status if new_status else "Idea") + "\n"
             entry_block += "- **Added:** " + today + "\n"
             if new_notes:
                 entry_block += "- **Notes:** " + new_notes + "\n"
@@ -8111,6 +8155,26 @@ def _handle_memory_read(handler):
         if user_file.exists()
         else ""
     )
+    # Build targets array for React MemoryView (hermes-ui.html compatibility)
+    def _build_entries(text):
+        parts = [p.strip() for p in text.split("§") if p.strip()]
+        return parts if parts else ([text.strip()] if text.strip() else [])
+    mem_entries = _build_entries(memory)
+    user_entries = _build_entries(user)
+    mem_usage = f"{len(memory):,} chars" if memory else "Empty"
+    user_usage = f"{len(user):,} chars" if user else "Empty"
+    # Parse usage percentage from first line if present (e.g., "[94% — 2,076/2,200 chars]")
+    import re
+    mem_pct = re.search(r'\[(\d+)%', memory[:200])
+    if mem_pct:
+        mem_usage = f"{mem_pct.group(1)}% used"
+    user_pct = re.search(r'\[(\d+)%', user[:200])
+    if user_pct:
+        user_usage = f"{user_pct.group(1)}% used"
+    targets = [
+        {"target": "memory", "entries": mem_entries, "usage": mem_usage},
+        {"target": "user", "entries": user_entries, "usage": user_usage},
+    ]
     return j(
         handler,
         {
@@ -8120,6 +8184,7 @@ def _handle_memory_read(handler):
             "user_path": str(user_file),
             "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "targets": targets,
         },
     )
 
@@ -10675,20 +10740,74 @@ def _mcp_runtime_status_by_name() -> dict[str, dict]:
 
     ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
     configuration; it does not probe or spawn MCP subprocesses. If Hermes Agent
-    is unavailable, fall back to an empty map so the API remains safe.
+    is unavailable, fall back to parsing ``hermes mcp list`` subprocess output.
+
+    Always supplements with CLI ``connected`` status because the agent-internal
+    status may not reflect live MCP server connectivity.
     """
     try:
         from tools.mcp_tool import get_mcp_status
         statuses = get_mcp_status()
     except Exception:
-        return {}
+        statuses = None
+    # Always fetch CLI status for live connectivity info
+    cli_entries = _mcp_runtime_from_cli()
+    cli_by_name = {str(e.get("name")): e for e in cli_entries if e.get("name")}
     if not isinstance(statuses, list):
-        return {}
+        statuses = cli_entries
+    else:
+        # Merge CLI connectivity into agent status entries
+        for entry in statuses:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", ""))
+            cli = cli_by_name.get(name, {})
+            if cli.get("connected"):
+                entry["connected"] = True
+            if cli.get("active"):
+                entry["active"] = True
     return {
         str(entry.get("name")): entry
         for entry in statuses
         if isinstance(entry, dict) and entry.get("name")
     }
+
+
+def _mcp_runtime_from_cli() -> list[dict]:
+    """Fallback: parse ``hermes mcp list`` to build runtime status entries."""
+    import subprocess, shutil
+    hermes_bin = shutil.which("hermes")
+    if not hermes_bin:
+        return []
+    try:
+        result = subprocess.run(
+            [hermes_bin, "mcp", "list"],
+            capture_output=True, text=True, timeout=15
+        )
+    except Exception:
+        return []
+    if result.returncode != 0 or not result.stdout:
+        return []
+    entries = []
+    for line in result.stdout.strip().split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("─") or stripped.startswith("Name") or stripped.startswith("MCP"):
+            continue
+        # Regex: name, transport (greedy until 2+ spaces), tools word, status
+        m = re.match(r"^\s+(\S+)\s+(.+?)\s{2,}(\S+)\s+(.+)$", line)
+        if not m:
+            continue
+        name = m.group(1)
+        raw_status = m.group(4).strip()
+        active = "✓" in raw_status or "enabled" in raw_status.lower()
+        entries.append({
+            "name": name,
+            "active": active,
+            "connected": active,
+            "status": "active" if active else "disabled",
+            "tools": m.group(3),
+        })
+    return entries
 
 
 def _server_summary(name, cfg, runtime_status=None):
@@ -10708,7 +10827,7 @@ def _server_summary(name, cfg, runtime_status=None):
         return out
 
     enabled = _parse_mcp_enabled(cfg.get("enabled", True))
-    connected = bool(runtime_status.get("connected")) if enabled else False
+    connected = bool(runtime_status.get("connected") or runtime_status.get("active")) if enabled else False
     if "url" in cfg:
         out["transport"] = "http"
         # Mask auth headers
@@ -10892,6 +11011,34 @@ def _mcp_tools_from_registry(server_summaries):
     return tools
 
 
+def _mcp_tools_from_config(servers, server_summaries):
+    """Fallback: build toolset entries from server configs when no runtime/registry data."""
+    tools = []
+    for name, scfg in servers.items():
+        if not isinstance(scfg, dict):
+            continue
+        summary = server_summaries.get(str(name), {"name": str(name)})
+        active = summary.get("active", False)
+        transport = scfg.get("transport", "stdio")
+        url = scfg.get("url", "")
+        desc_parts = [f"MCP server ({transport})"]
+        if url:
+            desc_parts.append(url)
+        # Build a single toolset entry per server
+        toolset = {
+            "name": f"mcp-{name}",
+            "server": str(name),
+            "label": str(name),
+            "description": " | ".join(desc_parts),
+            "enabled": active,
+            "available": True,
+            "configured": True,
+            "tools": [str(name)],  # placeholder — can't enumerate without agent
+        }
+        tools.append(toolset)
+    return tools
+
+
 def _handle_mcp_tools_list(handler):
     """List known MCP tools from already-available runtime inventory only."""
     cfg = get_config()
@@ -10908,6 +11055,11 @@ def _handle_mcp_tools_list(handler):
     if not tools:
         tools = _mcp_tools_from_registry(server_summaries)
         source = "tool_registry" if tools else "none"
+    if not tools and servers:
+        # Third fallback: build stub toolsets from server configs
+        # when Hermes Agent internals are unreachable (standalone WebUI mode)
+        tools = _mcp_tools_from_config(servers, server_summaries)
+        source = "mcp_config" if tools else "none"
     tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
     unavailable_servers = [
         summary["name"] for summary in server_summaries.values()

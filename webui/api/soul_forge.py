@@ -257,7 +257,8 @@ def forge_chat(god_name: str, god_domain: str, message: str) -> dict:
     return {"reply": reply, "soul_draft": soul_draft, "done": bool(soul_draft)}
 
 
-def forge_accept(god_name: str, soul_draft: str, god_home: Path, god_domain: str = "") -> dict:
+def forge_accept(god_name: str, soul_draft: str, god_home: Path, god_domain: str = "",
+        icon: str = "", color: str = "", display_name: str = "") -> dict:
     """Accept the SOUL.md draft, scaffold the god profile via CLI, and save SOUL.md.
 
     Runs `pantheon init` to create the full profile scaffolding (config, Codex,
@@ -308,6 +309,24 @@ def forge_accept(god_name: str, soul_draft: str, god_home: Path, god_domain: str
         soul_path = god_home / "SOUL.md"
         god_home.mkdir(parents=True, exist_ok=True)
         soul_path.write_text(soul_draft, encoding="utf-8")
+
+        # Write god.json metadata (icon, color, display_name)
+        try:
+            import json as _json
+            god_json_path = god_home / "god.json"
+            god_meta = {}
+            if god_json_path.exists():
+                try: god_meta = _json.loads(god_json_path.read_text(encoding="utf-8"))
+                except Exception: pass
+            if display_name: god_meta["display_name"] = display_name
+            if icon: god_meta["icon"] = icon
+            if color: god_meta["color"] = color
+            if god_domain: god_meta["domain"] = god_domain
+            god_json_path.write_text(_json.dumps(god_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            logger.info("god.json written for %s: %s", god_name, god_json_path)
+        except Exception as e:
+            logger.warning("Could not write god.json for %s: %s", god_name, e)
+
         _delete_session(god_name)
         logger.info("Forged SOUL.md saved to %s", soul_path)
         return {"ok": True, "path": str(soul_path)}

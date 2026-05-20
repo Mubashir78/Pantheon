@@ -174,13 +174,14 @@ mcp = FastMCP(
 Available systems:
 - **Athenaeum** — file-based knowledge store with Codex-partitioned semantic search
 - **Messaging** — inter-god message delivery via file-based inboxes
+- **Ichor Brief** — query-less recall: 'what should I know right now?' — ranked context from conversation memory
+- **Ichor Graph** — multi-hop NL graph queries: 'what tools does Hermes use?' — relation inference + entity resolution + path walking
 - **Skills** — shared executable skills hub at athenaeum/skills/
 - **Hades** — nightly consolidation reports
 - **God Roster** — registered god information
 
 All tools are Codex-aware: you can scope searches, reads, and writes to specific
-Codices (Codex-Forge, Codex-Pantheon, Codex-Infrastructure, etc.).
-""",
+Codices (Codex-Forge, Codex-Pantheon, Codex-Infrastructure, etc.).""",
     host="127.0.0.1",
     port=8010,
     log_level="INFO",
@@ -630,6 +631,59 @@ def messaging_check_inbox(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_brief
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Get a ranked context brief for a Pantheon god — 'what should I know right now?'. Scores events by priority (blockers > commitments > decisions), freshness, confidence, and repetition. No search query needed.",
+)
+def ichor_brief(
+    god_name: str = "",
+    limit: int = 10,
+    min_score: float = 0.20,
+    include_all_gods: bool = False,
+    output_json: bool = True,
+) -> str:
+    """Get a ranked context brief for a Pantheon god — zero-query recall.
+
+    Returns the most relevant events for a god, scored by a weighted formula
+    combining priority (event type), freshness (time decay), confidence (Tier A
+    extraction), and repetition (occurrence count).
+
+    Args:
+        god_name: Filter events for this specific god (e.g. 'hermes', 'hephaestus').
+                  Empty string returns events for all gods.
+        limit: Maximum number of events to return (default: 10, max: 50).
+        min_score: Minimum relevance score threshold 0.0-1.0 (default: 0.20).
+                   Higher values filter out lower-confidence events.
+        include_all_gods: If True, include events from ALL gods even when
+                         god_name is set. Gives cross-god awareness.
+        output_json: If True (default), returns structured JSON. If False,
+                     returns formatted markdown.
+
+    Returns:
+        JSON string with ranked events and metadata, or markdown string.
+    """
+    try:
+        # Import and build the brief
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_brief import build_brief  # type: ignore[import-untyped]
+
+        result = build_brief(
+            god_name=god_name,
+            limit=min(limit, 50),
+            min_score=min_score,
+            include_all_gods=include_all_gods,
+            output_format="json" if output_json else "markdown",
+        )
+        if output_json:
+            return json.dumps(result, indent=2, default=str)
+        return result
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_brief failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Tool: hades_get_report
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -712,6 +766,456 @@ def god_list() -> str:
         return json.dumps({"gods": gods}, indent=2)
     except Exception as exc:
         return json.dumps({"error": f"Failed to parse gods.yaml: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_retrieve
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Fused search across all Ichor memory backends (FTS5 keyword + ChromaDB semantic + Graph relationships + structured events). Returns ranked results with fused relevance scores. Part of the Memory Trait Contract.",
+)
+def ichor_retrieve(
+    query: str,
+    limit: int = 10,
+    backends: str = "fts5,chroma,graph,events",
+    min_score: float = 0.0,
+) -> str:
+    """Unified retrieval across all Ichor backends — 'what do we know about X?'
+
+    Searches all configured memory backends simultaneously, fuses results
+    with a weighted scoring formula, and returns ranked results.
+
+    Args:
+        query: Natural language search query.
+        limit: Maximum results to return (default: 10, max: 50).
+        backends: Comma-separated backend list. Options: fts5, chroma, graph, events.
+                  Default: 'fts5,chroma,graph,events' (all backends).
+        min_score: Minimum fused score threshold 0.0-1.0 (default: 0.0).
+
+    Returns:
+        JSON with ranked results, backends used, and scores.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_hybrid import MemoryTrait  # type: ignore[import-untyped]
+
+        backend_list = [b.strip() for b in backends.split(",") if b.strip()]
+        trait = MemoryTrait()
+        result = trait.retrieve(
+            query=query,
+            limit=min(limit, 50),
+            backends=backend_list,
+            min_score=min_score,
+            output_format="json",
+        )
+        return json.dumps(result, indent=2, default=str)
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_retrieve failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_store
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Store content into Ichor memory — auto-routes to correct backend based on category. Part of the Memory Trait Contract. Categories: fact, preference, decision, commitment, insight, blocker, follow_up → ichor_events (FTS5). document, note → Athenaeum files. entity, relationship → Graph DB.",
+)
+def ichor_store(
+    key: str,
+    content: str,
+    namespace: str = "default",
+    category: str = "fact",
+    session_id: str = "",
+    god_name: str = "",
+) -> str:
+    """Store content into Ichor memory with automatic backend routing.
+
+    Args:
+        key: Unique identifier for the stored item.
+        content: Content to store (markdown text).
+        namespace: Logical grouping (default: 'default').
+        category: Content category for backend routing.
+        session_id: Optional source session ID.
+        god_name: Optional god name for scoping.
+
+    Returns:
+        JSON with store result and backend used.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_hybrid import MemoryTrait
+
+        trait = MemoryTrait()
+        result = trait.store(
+            namespace=namespace, key=key, content=content,
+            category=category, session_id=session_id, god_name=god_name,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_store failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_forget
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Delete an item from Ichor memory by key (e.g. 'fts5:42', 'graph:node:abc'). Part of the Memory Trait Contract.",
+)
+def ichor_forget(
+    key: str,
+) -> str:
+    """Delete an item from Ichor memory.
+
+    Args:
+        key: '<backend>:<id>' — e.g. 'fts5:42', 'graph:node:abc'.
+
+    Returns:
+        JSON confirmation.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_hybrid import MemoryTrait
+
+        trait = MemoryTrait()
+        result = trait.forget(key=key)
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_forget failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_health
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Check health of all Ichor memory backends (FTS5, ChromaDB, Graph, Events). Part of the Memory Trait Contract.",
+)
+def ichor_health() -> str:
+    """Check health of all Ichor memory backends.
+
+    Returns:
+        JSON with per-backend health and fused status.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_hybrid import MemoryTrait
+
+        trait = MemoryTrait()
+        result = trait.health_check()
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_health failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_gates
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Test or run the Ichor RALPH 5-gate harness. Supports: state_gate (read-before-write check on a file), logic_gate (syntax validate a file), phase_detect (detect RALPH phase from text), handoff (generate handoff manifest between gods). Returns gate results and intervention details.",
+)
+def ichor_gates(
+    action: str,
+    path_or_input: str = "",
+    source_god: str = "hermes",
+    target_god: str = "hephaestus",
+    tier: str = "full",
+    verbose: bool = False,
+) -> str:
+    """Run the Ichor RALPH 5-gate harness.
+
+    Enforces deterministic tool-call gating: State Gate (read-before-write),
+    Logic Gate (post-write syntax validation), Intent Injection (context
+    pre-fetching), Phase Detection (RALPH phase tracking), and Handoff Gate
+    (state verification + signed seal).
+
+    Args:
+        action: One of 'state_gate', 'logic_gate', 'phase_detect',
+                'handoff', 'pipeline_health'.
+        path_or_input: File path (for state/logic gates) or natural language
+                       input (for phase detection).
+        source_god: Source god name for handoff (default: hermes).
+        target_god: Target god name for handoff (default: hephaestus).
+        tier: Handoff tier: 'full' (all 6 checks) or 'bronze' (git+mandatory).
+        verbose: If True, include detailed gate state in output.
+
+    Returns:
+        JSON with gate results, intervention details, and recovery hints.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_gates import (  # type: ignore[import-untyped]
+            GatePipeline,
+            LogicGate,
+            PhaseDetectionGate,
+            ReadCache,
+            StateGate,
+        )
+
+        pipeline = GatePipeline()
+        result: dict = {"action": action, "gate": "", "passed": True,
+                        "message": "", "details": {}}
+
+        if action == "state_gate":
+            if not path_or_input:
+                return json.dumps({"error": "path_or_input required for state_gate"})
+            cache = ReadCache()
+            gate = StateGate(cache)
+
+            # Test without prior read
+            r = gate.pre_call("write_file", {"path": path_or_input}, {})
+            if r and not r.passed:
+                result["gate"] = "state_gate"
+                result["passed"] = False
+                result["message"] = r.message
+                result["details"]["recovery"] = r.recovery_hint
+                result["details"]["intervention"] = True
+            else:
+                result["message"] = "File appears new or was read — write allowed"
+
+            # Show what happens after read
+            cache.mark_read(path_or_input)
+            r2 = gate.pre_call("write_file", {"path": path_or_input}, {})
+            result["details"]["after_read"] = "blocked" if (r2 and not r2.passed) else "allowed"
+
+        elif action == "logic_gate":
+            if not path_or_input:
+                return json.dumps({"error": "path_or_input required for logic_gate"})
+            gate = LogicGate()
+            try:
+                with open(path_or_input, "r") as f:
+                    content = f.read()
+            except FileNotFoundError:
+                return json.dumps({"error": f"File not found: {path_or_input}"})
+
+            r = gate.post_call("write_file", {"path": path_or_input,
+                                "content": content}, None, {})
+            if r and not r.passed:
+                result["gate"] = "logic_gate"
+                result["passed"] = False
+                result["message"] = r.message
+                result["details"]["issues"] = r.recovery_hint.split("\n")
+                result["details"]["intervention"] = r.intervention
+            else:
+                result["message"] = "File passed syntax validation"
+                result["details"]["issues"] = []
+
+        elif action == "phase_detect":
+            if not path_or_input:
+                return json.dumps({"error": "path_or_input required for phase_detect"})
+            gate = PhaseDetectionGate()
+            phase = gate.detect_phase(path_or_input)
+            result["gate"] = "phase_detection_gate"
+            result["message"] = f"Detected phase: {phase.value}"
+            result["details"]["phase"] = phase.value
+            result["details"]["tools"] = gate.get_allowed_tools() or []
+            result["details"]["prompt"] = gate.get_phase_prompt()
+
+        elif action == "handoff":
+            manifest = pipeline.generate_handoff_manifest(
+                source_god, target_god, tier
+            )
+            result["gate"] = "handoff_gate"
+            result["message"] = (f"Handoff {source_god} → {target_god} "
+                                 f"[{manifest.tier.upper()}]")
+            result["details"]["source"] = source_god
+            result["details"]["target"] = target_god
+            result["details"]["tier"] = manifest.tier
+            result["details"]["seal"] = manifest.signature
+            result["details"]["checks"] = manifest.check_results
+            result["details"]["state_size"] = manifest.state_snapshot.get("count", 0)
+            all_pass = all(manifest.check_results.values())
+            result["passed"] = all_pass
+            if verbose:
+                result["details"]["state_snapshot"] = manifest.state_snapshot
+
+        elif action == "pipeline_health":
+            gates = ["state_gate", "logic_gate", "intent_injection_gate",
+                     "phase_detection_gate", "handoff_gate"]
+            result["message"] = f"Gate pipeline ready: {len(gates)} gates"
+            result["details"]["gates"] = gates
+            result["details"]["pipeline_size"] = len(pipeline.gates)
+
+        else:
+            return json.dumps({
+                "error": f"Unknown action '{action}'. Options: state_gate, "
+                         "logic_gate, phase_detect, handoff, pipeline_health"
+            })
+
+        return json.dumps(result, indent=2)
+
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_gates failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_forge
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Run the Ichor Forge — self-adjusting harness analysis. Analyzes gate intervention logs to detect over-blocking, missing intent keywords, phase detection issues, and recurring failure patterns. Supports: analyze (full report), status (quick summary), adjust (propose changes). The forge is the meta-learning loop — like Dojo for the gates themselves.",
+)
+def ichor_forge(
+    action: str = "status",
+    days: int = 7,
+    verbose: bool = False,
+    god: str = "",
+) -> str:
+    """Run the Ichor Forge — self-adjusting harness analysis.
+
+    Reads intervention logs from ~/.hermes/ichor/forge/all.jsonl and
+    produces analysis: per-gate metrics, failure patterns, model-specific
+    issues, missing intent keywords, and suggested adjustments.
+    Supports per-god filtering — different gods have different behavior
+    patterns and need different tuning.
+
+    Args:
+        action: One of 'status' (quick summary), 'analyze' (full report),
+                'adjust' (propose changes), 'json' (raw data).
+        days: Lookback window in days (default: 7).
+        verbose: Include per-gate detail in analyze mode.
+        god: Filter by god name (e.g. 'hermes', 'apollo', 'hephaestus').
+             Empty string (default) analyzes all gods together.
+
+    Returns:
+        JSON with forge findings: total_interventions, overall_block_rate,
+        per_gate metrics, detected_patterns, suggested_adjustments.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_forge import (  # type: ignore[import-untyped]
+            ForgeAnalyzer,
+            ForgeReport,
+            ForgeSmith,
+        )
+
+        analyzer = ForgeAnalyzer()
+        smith = ForgeSmith()
+        report = ForgeReport()
+
+        if action == "status":
+            findings = analyzer.analyze(days=days, god=god)
+            return json.dumps({
+                "action": "status",
+                "short_status": report.short_status(findings),
+                "total_interventions": findings.total_interventions,
+                "overall_block_rate": round(findings.overall_block_rate, 3),
+                "gates_active": len(findings.gates_seen),
+                "patterns_found": len(findings.detected_patterns),
+                "adjustments_suggested": len(findings.suggested_adjustments),
+            }, indent=2)
+
+        elif action == "analyze":
+            findings = analyzer.analyze(days=days, god=god)
+            result = {
+                "action": "analyze",
+                "total_interventions": findings.total_interventions,
+                "timespan_days": round(findings.timespan_days, 1),
+                "overall_block_rate": round(findings.overall_block_rate, 3),
+                "models_seen": findings.models_seen,
+                "gates_seen": findings.gates_seen,
+                "per_gate": {},
+                "detected_patterns": findings.detected_patterns,
+                "suggested_adjustments": findings.suggested_adjustments,
+            }
+            for gate_name, gm in findings.per_gate.items():
+                result["per_gate"][gate_name] = {
+                    "total": gm.total,
+                    "passed": gm.passed,
+                    "blocked": gm.blocked,
+                    "block_rate": round(gm.block_rate, 3),
+                }
+                if verbose:
+                    result["per_gate"][gate_name]["top_blocks"] = [
+                        {"message": m, "count": c}
+                        for m, c in gm.top_block_messages.most_common(5)
+                    ]
+            return json.dumps(result, indent=2)
+
+        elif action == "adjust":
+            findings = analyzer.analyze(days=days, god=god)
+            adjustments = smith.evaluate(findings)
+            return json.dumps({
+                "action": "adjust",
+                "total_interventions": findings.total_interventions,
+                "adjustments": [
+                    {
+                        "target": a.target,
+                        "action": a.action,
+                        "item": a.item,
+                        "reason": a.reason,
+                        "confidence": round(a.confidence, 2),
+                    }
+                    for a in adjustments
+                ],
+            }, indent=2)
+
+        elif action == "json":
+            import dataclasses
+            findings = analyzer.analyze(days=days)
+            return json.dumps(
+                dataclasses.asdict(findings),
+                indent=2, default=str,
+            )
+
+        else:
+            return json.dumps({
+                "error": f"Unknown action '{action}'. "
+                         "Options: status, analyze, adjust, json"
+            })
+
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_forge failed: {exc}"}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: ichor_graph_query
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Query the Pantheon knowledge graph with natural language. Walks multi-hop relationships to answer questions like 'What tools does Hermes use?', 'Who created Pantheon?', 'What does Apollo contain?'. Supports relation inference, entity resolution, and multi-hop traversal.",
+)
+def ichor_graph_query(
+    query: str,
+    hops: int = 0,
+    max_results: int = 30,
+    output_markdown: bool = False,
+) -> str:
+    """Natural language query against the Pantheon knowledge graph.
+
+    Parses natural language questions, resolves entity names, infers
+    relation types, and walks the graph to find connected nodes.
+
+    Args:
+        query: Natural language query (e.g. 'What tools does Hermes use?').
+        hops: Max traversal depth (0=auto: 1 for specific relations,
+              2 for exploration). Default: 0 (auto).
+        max_results: Maximum results to return (default: 30, max: 100).
+        output_markdown: If True, returns formatted markdown instead of JSON.
+
+    Returns:
+        JSON or markdown with results grouped by edge type.
+    """
+    try:
+        sys.path.insert(0, str(Path.home() / "pantheon"))
+        from lib.ichor_graph_query import GraphQueryEngine  # type: ignore[import-untyped]
+
+        engine = GraphQueryEngine()
+        result = engine.query(
+            nl_query=query,
+            hops=hops,
+            max_results=min(max_results, 100),
+            output_format="markdown" if output_markdown else "json",
+        )
+        engine.close()
+
+        if output_markdown:
+            return str(result)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as exc:
+        return json.dumps({"error": f"ichor_graph_query failed: {exc}"}, indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

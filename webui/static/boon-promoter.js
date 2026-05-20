@@ -212,7 +212,7 @@
 
   function start() {
     addPromoteButtons();
-    addBoonsButton();
+    // Boons header button is now injected by boons-panel.js into the Hermes UI toolbar.
     observer.observe(document.getElementById('root') || document.body, { childList: true, subtree: true });
   }
 

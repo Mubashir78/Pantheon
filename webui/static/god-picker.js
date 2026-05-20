@@ -108,6 +108,20 @@
   function inject() {
     injectStyles();
 
+    // Hide the hardcoded personality dropdown from hermes-ui.html
+    // (we replace it with the Pantheon god picker)
+    var hidePersonality = function() {
+      var footer = document.querySelector('.sidebar-footer');
+      if (footer) footer.style.display = 'none';
+    };
+    hidePersonality();
+    // Also hide it on dynamic re-renders
+    var observer = new MutationObserver(function() {
+      var footer = document.querySelector('.sidebar-footer');
+      if (footer && footer.style.display !== 'none') footer.style.display = 'none';
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
     function tryPlace() {
       // Find the sidebar-nav and insert BEFORE it (after logo/close, before Chat)
       var sidebarNav = document.querySelector('.sidebar-nav');

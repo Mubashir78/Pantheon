@@ -21,7 +21,8 @@ _REAL_HOME = os.path.expanduser("~")
 sys.path.insert(0, _REAL_HOME + "/pantheon/pantheon-core/gods")
 
 # Load profile-level .env for API keys
-_ENV_FILE = _REAL_HOME + "/.hermes/profiles/hephaestus/.env"
+# Point at main Hermes profile so all API keys (OPENCODE_GO, etc.) are available
+_ENV_FILE = _REAL_HOME + "/.hermes/.env"
 if os.path.isfile(_ENV_FILE):
     with open(_ENV_FILE) as _f:
         for _line in _f:

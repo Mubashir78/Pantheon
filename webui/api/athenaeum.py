@@ -313,41 +313,80 @@ def graph_search(query: str, mode: str = "hybrid", limit: int = 10) -> dict:
         cursor = conn.cursor()
 
         q = f"%{query}%"
-        if mode == "nodes":
-            cursor.execute(
-                "SELECT id, label, name, summary, properties FROM nodes WHERE name LIKE ? OR summary LIKE ? LIMIT ?",
-                (q, q, limit)
-            )
-        elif mode == "edges":
-            cursor.execute(
-                """SELECT e.id, e.type, e.source_id, e.target_id, e.properties,
-                          n1.name as source_name, n1.label as source_label,
-                          n2.name as target_name, n2.label as target_label
-                   FROM edges e
-                   JOIN nodes n1 ON e.source_id = n1.id
-                   JOIN nodes n2 ON e.target_id = n2.id
-                   WHERE e.type LIKE ? OR n1.name LIKE ? OR n2.name LIKE ?
-                   LIMIT ?""",
-                (q, q, q, limit)
-            )
-        else:  # hybrid
-            cursor.execute(
-                """SELECT id, label, name, summary, 'node' as result_type FROM nodes
-                   WHERE name LIKE ? OR summary LIKE ?
-                   UNION ALL
-                   SELECT e.id, e.type as label, e.type as name,
-                          printf('%s → %s', n1.name, n2.name) as summary,
-                          'edge' as result_type
-                   FROM edges e
-                   JOIN nodes n1 ON e.source_id = n1.id
-                   JOIN nodes n2 ON e.target_id = n2.id
-                   WHERE e.type LIKE ? OR n1.name LIKE ? OR n2.name LIKE ?
-                   LIMIT ?""",
-                (q, q, q, q, q, limit)
-            )
 
-        rows = [dict(row) for row in cursor.fetchall()]
+        def _metadata(raw: str | None) -> dict[str, Any]:
+            if not raw:
+                return {}
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+
+        def _node_result(row: sqlite3.Row) -> dict[str, Any]:
+            meta = _metadata(row["metadata"])
+            summary = meta.get("description") or meta.get("summary") or meta.get("source") or ""
+            return {
+                "id": row["id"],
+                "label": row["label"],
+                "name": row["label"],
+                "type": row["type"],
+                "codex": row["codex"] or "",
+                "summary": summary,
+                "description": summary,
+                "result_type": "node",
+            }
+
+        def _edge_result(row: sqlite3.Row) -> dict[str, Any]:
+            meta = _metadata(row["metadata"])
+            source_label = row["source_label"] or row["source_id"]
+            target_label = row["target_label"] or row["target_id"]
+            summary = f"{source_label} → {target_label}"
+            if meta.get("source"):
+                summary = f"{summary} · {meta['source']}"
+            return {
+                "id": row["id"],
+                "label": row["type"],
+                "name": row["type"],
+                "type": row["type"],
+                "source_id": row["source_id"],
+                "target_id": row["target_id"],
+                "source_label": source_label,
+                "target_label": target_label,
+                "summary": summary,
+                "description": summary,
+                "result_type": "edge",
+            }
+
+        rows: list[dict[str, Any]] = []
+        if mode in {"nodes", "hybrid"}:
+            cursor.execute(
+                """SELECT id, label, type, codex, metadata, created_at
+                   FROM nodes
+                   WHERE label LIKE ? OR metadata LIKE ? OR codex LIKE ? OR type LIKE ?
+                   ORDER BY CASE WHEN label LIKE ? THEN 0 ELSE 1 END, updated_at DESC
+                   LIMIT ?""",
+                (q, q, q, q, f"{query}%", limit),
+            )
+            rows.extend(_node_result(row) for row in cursor.fetchall())
+
+        if mode in {"edges", "hybrid"} and len(rows) < limit:
+            cursor.execute(
+                """SELECT e.id, e.type, e.source_id, e.target_id, e.metadata,
+                          n1.label as source_label, n1.type as source_type,
+                          n2.label as target_label, n2.type as target_type
+                   FROM edges e
+                   LEFT JOIN nodes n1 ON e.source_id = n1.id
+                   LEFT JOIN nodes n2 ON e.target_id = n2.id
+                   WHERE e.type LIKE ? OR e.metadata LIKE ? OR n1.label LIKE ? OR n2.label LIKE ?
+                         OR e.source_id LIKE ? OR e.target_id LIKE ?
+                   ORDER BY e.created_at DESC
+                   LIMIT ?""",
+                (q, q, q, q, q, q, limit - len(rows)),
+            )
+            rows.extend(_edge_result(row) for row in cursor.fetchall())
+
         conn.close()
-        return {"results": rows, "total": len(rows)}
+        return {"results": rows[:limit], "total": len(rows[:limit])}
     except Exception as exc:
         return {"error": f"Graph search failed: {exc}", "results": []}

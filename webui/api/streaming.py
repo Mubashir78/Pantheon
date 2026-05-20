@@ -1939,7 +1939,10 @@ def _run_agent_streaming(
         # process-level active-profile global.  Falls back gracefully.
         try:
             from api.profiles import get_hermes_home_for_profile, get_profile_runtime_env
-            _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
+            # Use the cookie-based hermes_profile first (set by God Picker),
+            # fall back to s.profile for legacy sessions without the cookie.
+            _resolved_profile = getattr(s, 'hermes_profile', None) or getattr(s, 'profile', None)
+            _profile_home_path = get_hermes_home_for_profile(_resolved_profile)
             _profile_home = str(_profile_home_path)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:

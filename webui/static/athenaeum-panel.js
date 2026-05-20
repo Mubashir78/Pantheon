@@ -5,8 +5,11 @@
 
 async function api(url) {
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return r.json();
+  let data = null;
+  try { data = await r.json(); } catch (_) { data = null; }
+  if (!r.ok) throw new Error((data && data.error) || `${r.status} ${r.statusText}`);
+  if (data && data.error) throw new Error(data.error);
+  return data || {};
 }
 
 function el(tag, attrs = {}, ...children) {
@@ -14,7 +17,7 @@ function el(tag, attrs = {}, ...children) {
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'cls') e.className = v;
     else if (k === 'style') Object.assign(e.style, v);
-    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
     else e.setAttribute(k, v);
   }
   for (const c of children.flat()) {
@@ -53,10 +56,42 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+const READABLE_EXT_RE = /\.(md|txt|json|ya?ml)$/i;
+
+function isReadableFileName(name) {
+  return READABLE_EXT_RE.test(String(name || ''));
+}
+
+function directoryIndexPath(path) {
+  const p = String(path || 'INDEX.md').replace(/\/+$/, '');
+  if (!p || p === 'INDEX.md' || p.endsWith('/INDEX.md')) return p || 'INDEX.md';
+  return `${p}/INDEX.md`;
+}
+
+function childrenFromWalk(data) {
+  const dirs = (data.subdirectories || []).map(d => ({
+    type: 'directory',
+    name: d.name,
+    path: d.path,
+    lazy: true,
+    children: null
+  }));
+  const files = (data.files || [])
+    .filter(f => isReadableFileName(f.name))
+    .map(f => ({
+      type: 'file',
+      name: f.name,
+      path: f.path,
+      size_kb: f.size_kb,
+      last_modified: f.last_modified
+    }));
+  return dirs.concat(files);
+}
+
 // ── styles ────────────────────────────────────────────────────────────────────
 
 const CSS = `
-#athenaeum-panel {
+#athenaeum-panel, .athenaeum-panel-root {
   display:flex; height:100%; overflow:hidden;
   background:var(--bg); color:var(--text);
   font-family:inherit; font-size:14px;
@@ -190,7 +225,7 @@ function buildTree(node, depth, onFileClick) {
   if (!node) return null;
   const indent = depth * 14;
 
-  if (node.type === 'file' && node.name.endsWith('.md')) {
+  if (node.type === 'file' && isReadableFileName(node.name)) {
     const item = el('div', { cls: 'ath-tree-item', style: { paddingLeft: `${14 + indent}px` } },
       el('span', { cls: 'icon' }, '📄'),
       el('span', { cls: 'name', title: node.name }, node.name)
@@ -208,17 +243,65 @@ function buildTree(node, depth, onFileClick) {
     }, toggle, el('span', { cls: 'name', title: node.name }, node.name));
 
     let open = depth === 0;
+    let loaded = Array.isArray(node.children);
+    let loading = false;
+
+    function renderChildren(items) {
+      children.innerHTML = '';
+      let rendered = 0;
+      for (const child of (items || [])) {
+        const c = buildTree(child, depth + 1, onFileClick);
+        if (c) {
+          children.appendChild(c);
+          rendered += 1;
+        }
+      }
+      if (!rendered) {
+        children.appendChild(el('div', {
+          cls: 'ath-tree-item',
+          style: { paddingLeft: `${28 + indent}px`, color: 'var(--muted)', cursor: 'default' }
+        }, 'No readable files'));
+      }
+    }
+
     const refresh = () => {
-      toggle.textContent = open ? '▼' : '▶';
+      toggle.textContent = loading ? '…' : (open ? '▼' : '▶');
       children.classList.toggle('open', open);
     };
-    header.addEventListener('click', () => { open = !open; refresh(); });
 
-    for (const child of (node.children || [])) {
-      const c = buildTree(child, depth + 1, onFileClick);
-      if (c) children.appendChild(c);
+    async function ensureLoaded() {
+      if (loaded || loading || !node.path) return;
+      loading = true;
+      open = true;
+      refresh();
+      children.innerHTML = '';
+      children.appendChild(el('div', { cls: 'ath-state', style: { height: '44px' } }, el('div', { cls: 'ath-spinner' })));
+      try {
+        const data = await api(`/api/athenaeum/walk?path=${encodeURIComponent(directoryIndexPath(node.path))}`);
+        node.children = childrenFromWalk(data);
+        loaded = true;
+        renderChildren(node.children);
+      } catch (err) {
+        children.innerHTML = '';
+        children.appendChild(el('div', {
+          cls: 'ath-tree-item',
+          style: { paddingLeft: `${28 + indent}px`, color: 'var(--err, #e05)', cursor: 'default' }
+        }, `⚠️ ${err.message}`));
+      } finally {
+        loading = false;
+        refresh();
+      }
     }
+
+    header.addEventListener('click', async () => {
+      open = !open;
+      refresh();
+      if (open) await ensureLoaded();
+    });
+
+    if (loaded) renderChildren(node.children || []);
     refresh();
+    if (open) ensureLoaded();
     const wrap = document.createDocumentFragment();
     wrap.appendChild(header);
     wrap.appendChild(children);
@@ -231,7 +314,7 @@ function buildTree(node, depth, onFileClick) {
 
 function mountAthenaeum(container) {
   injectStyles();
-  container.id = 'athenaeum-panel';
+  container.classList.add('athenaeum-panel-root');
 
   // ── state
   let activeFileItem = null;
@@ -326,7 +409,7 @@ function mountAthenaeum(container) {
   // ── load codex tree
   async function loadCodexTree(codexName) {
     const existing = treeEl.querySelector(`[data-codex="${codexName}"]`);
-    if (existing) { existing._toggle?.(); return; }
+    if (existing) { existing.remove(); return; }
 
     const placeholder = el('div', { cls: 'ath-state', style: { height: '60px' } },
       el('div', { cls: 'ath-spinner' })
@@ -337,7 +420,7 @@ function mountAthenaeum(container) {
       const data = await api(`/api/athenaeum/walk?path=${encodeURIComponent(codexName + '/INDEX.md')}`);
       placeholder.remove();
       const frag = buildTree(
-        { type: 'directory', name: codexName, children: data.tree || data.children || [] },
+        { type: 'directory', name: codexName, path: codexName, children: childrenFromWalk(data) },
         0,
         loadFile
       );
@@ -391,7 +474,7 @@ function mountAthenaeum(container) {
       el('div', { cls: 'ath-spinner' })
     ));
     try {
-      const data = await api(`/api/athenaeum/search?query=${encodeURIComponent(query)}&n_results=5`);
+      const data = await api(`/api/athenaeum/search?q=${encodeURIComponent(query)}&n=5`);
       searchResults.innerHTML = '';
       const results = data.results || [];
       if (!results.length) {
@@ -401,12 +484,13 @@ function mountAthenaeum(container) {
         return;
       }
       for (const r of results) {
+        const resultPath = r.path || r.file || r.source || '';
         const item = el('div', { cls: 'ath-result-item' },
-          el('div', { cls: 'r-path' }, r.path || r.file || ''),
+          el('div', { cls: 'r-path' }, resultPath || r.codex || ''),
           el('div', { cls: 'r-snippet' }, r.snippet || r.text || r.content || '')
         );
         item.addEventListener('click', () => {
-          if (r.path || r.file) loadFile(r.path || r.file, null);
+          if (resultPath) loadFile(resultPath, null);
           hideSearchResults();
           searchInput.value = '';
         });
@@ -435,7 +519,7 @@ function mountAthenaeum(container) {
       el('div', { cls: 'ath-spinner' })
     ));
     try {
-      const data = await api(`/api/athenaeum/graph-search?query=${encodeURIComponent(query)}`);
+      const data = await api(`/api/athenaeum/graph-search?q=${encodeURIComponent(query)}`);
       graphPanel.innerHTML = '';
       const nodes = data.nodes || data.results || [];
       graphPanel.appendChild(el('h4', {}, `Graph: "${query}"`));
@@ -444,11 +528,13 @@ function mountAthenaeum(container) {
         return;
       }
       for (const n of nodes) {
+        const type = n.type || n.result_type || n.label || 'node';
+        const desc = n.description || n.summary || '';
         graphPanel.appendChild(el('div', { cls: 'ath-graph-node' },
-          el('span', { cls: 'gn-type' }, n.type || 'node'),
+          el('span', { cls: 'gn-type' }, type),
           el('div', {},
             el('div', { cls: 'gn-name' }, n.name || n.id || ''),
-            el('div', { cls: 'gn-desc' }, n.description || n.summary || '')
+            el('div', { cls: 'gn-desc' }, desc)
           )
         ));
       }

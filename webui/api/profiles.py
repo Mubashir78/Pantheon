@@ -907,6 +907,10 @@ def list_profiles_api() -> list:
     result = []
     for p in infos:
         god_md = _read_god_metadata(p.path)
+        # Check if god.json actually exists on disk (not just a fallback default)
+        god_json_path = Path(p.path) / _GOD_METADATA_FILE
+        is_god = god_json_path.exists()
+        hidden = god_md.get('hidden', False) if isinstance(god_md, dict) else False
         result.append({
             'name': p.name,
             'path': str(p.path),
@@ -918,6 +922,8 @@ def list_profiles_api() -> list:
             'has_env': p.has_env,
             'skill_count': p.skill_count,
             'god': god_md,
+            'is_god': is_god,
+            'hidden': hidden,
         })
     return result
 
