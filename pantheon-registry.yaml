@@ -1,12 +1,4 @@
 gods:
-- harness: zeus-base.yaml
-  name: Zeus
-  studios: none
-  type: orchestrator
-- harness: hecate-base.yaml
-  name: Hecate
-  studios: none
-  type: service
 - harness: apollo-base.yaml
   name: Apollo
   studios:
@@ -20,29 +12,12 @@ gods:
   - program-design
   - infrastructure-planning
   type: conversational
-- harness: athena-base.yaml
-  name: Athena
-  studios: none
-  type: conversational
 - harness: hermes-base.yaml
   name: Hermes
   studios: none
-  type: service
-- harness: hestia-base.yaml
-  name: Hestia
-  studios: none
-  type: subsystem
-- harness: demeter-base.yaml
-  name: Demeter
-  studios: none
-  type: subsystem
-- harness: kronos-base.yaml
-  name: Kronos
-  studios: none
-  type: subsystem
+  type: conversational
 - author: Konan
-  description: "Lyric-writing, poetry, and song creation god \u2014 creative work\
-    \ in your established voice"
+  description: "Lyric-writing, poetry, and song creation god — creative work in your established voice"
   harness: god-apollo-base.yaml
   id: god-apollo
   name: Apollo
@@ -53,4 +28,23 @@ gods:
   - poetry
   type: conversational
   version: 1.0.0
-
+- author: Konan
+  description: "Knowledge synthesis, research, and idea capture — the ever-curious second brain that weaves scattered explorations into coherent insight"
+  harness: thoth-base.yaml
+  id: thoth
+  name: Thoth
+  private: true
+  sanctuary: The Bibliotheca
+  studios: none
+  type: conversational
+  version: 1.0.0
+- author: Konan
+  description: "Medicine, medication management, health research, and healing rhythms — a calm, collaborative guide through health complexity"
+  harness: caduceus-base.yaml
+  id: caduceus
+  name: Caduceus
+  private: true
+  sanctuary: The Asclepion
+  studios: none
+  type: conversational
+  version: 1.0.0

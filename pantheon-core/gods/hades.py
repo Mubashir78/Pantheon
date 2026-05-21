@@ -188,12 +188,17 @@ class HadesReport:
 
         # Entity extraction summary
         extr = self.extraction
-        if extr.get("entities_extracted", 0) > 0 or extr.get("error"):
+        if extr.get("entities_extracted", 0) > 0 or extr.get("error") or extr.get("status") == "deprecated":
             lines.append("")
-            lines.append(f"## 🔗 Entity Extraction")
-            if extr.get("error"):
+            if extr.get("status") == "deprecated":
+                lines.append(f"## 🔗 Entity Extraction — ⚠️ Deprecated")
+                lines.append(f"- Status: Replaced by {extr.get('replaced_by', 'Ichor Tier A (zero-LLM regex extraction)')}")
+                lines.append(f"- See `~/pantheon/ichor-memory-engine-rollout.md` for the Ichor rollout plan")
+            elif extr.get("error"):
+                lines.append(f"## 🔗 Entity Extraction")
                 lines.append(f"- ❌ Error: {extr['error']}")
             else:
+                lines.append(f"## 🔗 Entity Extraction")
                 lines.append(f"- Files processed: {extr.get('files_processed', 0)}")
                 lines.append(f"- Entities extracted: {extr.get('entities_extracted', 0)}")
                 lines.append(f"- Relations extracted: {extr.get('relations_extracted', 0)}")
@@ -951,64 +956,16 @@ def run_hades() -> HadesReport:
             report.errors.append(f"Shared context sweep failed: {exc}")
             logger.exception("Hades shared context sweep error")
 
-        # Phase 5: Entity extraction from Athenaeum files
-        logger.info("Hades: Running entity extraction...")
-        try:
-            _REAL_HOME = os.path.expanduser("~")
-            extract_script = os.path.join(_REAL_HOME, "athenaeum", "scripts", "extract-entities.py")
-            if os.path.exists(extract_script):
-                import subprocess, sys
-                env = os.environ.copy()
-                for _env_path in [Path(f"{_REAL_HOME}/.hermes/.env"), Path(f"{_REAL_HOME}/pantheon/.env")]:
-                    if _env_path.exists():
-                        for line in _env_path.read_text().split("\n"):
-                            line = line.strip()
-                            if line and "=" in line and not line.startswith("#"):
-                                k, v = line.split("=", 1)
-                                env.setdefault(k.strip(), v.strip().strip("'\""))
-                result = subprocess.run(
-                    [sys.executable, extract_script],
-                    capture_output=True, text=True, timeout=1200, env=env,
-                )
-                if result.returncode == 0:
-                    # Parse summary from output
-                    for line in result.stdout.split("\n"):
-                        if "Total entities extracted:" in line:
-                            try:
-                                report.extraction["entities_extracted"] = int(line.split(":")[-1].strip())
-                            except (ValueError, IndexError):
-                                pass
-                        elif "Total relations extracted:" in line:
-                            try:
-                                report.extraction["relations_extracted"] = int(line.split(":")[-1].strip())
-                            except (ValueError, IndexError):
-                                pass
-                        elif "Processed:" in line and "files" in line.lower():
-                            try:
-                                report.extraction["files_processed"] = int(line.split(":")[-1].strip().split()[0])
-                            except (ValueError, IndexError):
-                                pass
-                        elif "Failed:" in line and "files" in line.lower():
-                            try:
-                                report.extraction["files_failed"] = int(line.split(":")[-1].strip().split()[0])
-                            except (ValueError, IndexError):
-                                pass
-                    logger.info("  → %d entities, %d relations extracted",
-                                 report.extraction["entities_extracted"],
-                                 report.extraction["relations_extracted"])
-                else:
-                    err = result.stderr.strip()[:200] if result.stderr.strip() else "exit code != 0"
-                    report.extraction["error"] = f"extract-entities failed: {err}"
-                    logger.warning("  → Entity extraction failed: %s", err)
-            else:
-                report.extraction["error"] = f"Script not found: {extract_script}"
-                logger.warning("  → Entity extraction script not found")
-        except subprocess.TimeoutExpired:
-            report.extraction["error"] = "extract-entities timed out after 20m"
-            logger.warning("  → Entity extraction timed out")
-        except Exception as exc:
-            report.extraction["error"] = f"Entity extraction error: {exc}"
-            logger.exception("Hades entity extraction error")
+        # Phase 5: Entity extraction — REPLACED (zero-LLM graph sync is LIVE)
+        # LLM-based extraction (extract-entities.py) has been replaced by
+        # Ichor Tier A regex extraction (zero-LLM), which now writes directly to
+        # graph.db via lib/ichor_tier_a.py → GraphClient.
+        logger.info("Hades: Entity extraction — skipping (LLM-based extract-entities.py replaced)")
+        logger.info("  → Replaced by Ichor Tier A regex extraction (zero-LLM) — graph write is LIVE")
+        report.extraction["status"] = "replaced"
+        report.extraction["replaced_by"] = "Ichor Tier A (zero-LLM regex → graph.db)"
+        report.extraction["entities_extracted"] = 0
+        report.extraction["relations_extracted"] = 0
 
         # Phase 6: Load suggestions
         logger.info("Hades: Loading suggestions...")

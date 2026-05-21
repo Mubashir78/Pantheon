@@ -1,32 +1,28 @@
+# gods.yaml — ☠️ DEPRECATED
+#
+# This file is LEGACY and NOT referenced by any active code.
+# Replaced by per-god metadata in ~/.hermes/profiles/<god>/god.json
+# Canonical architecture: ~/pantheon/ARCHITECTURE.md
+#
 gods:
-  apollo:
-    capabilities:
-    - lyric_writing
-    - song_creation
-    - poetry
-    - suno_production
-    description: Lyric-writing, poetry, and song creation god. Works in your established
-      creative voice with Lyric Smith, Suno Formatter, and Stylish Style Maker.
-    display_name: Apollo
-    role: Creative God of Songcraft
-    status: active
-  hephaestus:
-    capabilities:
-    - tool_building
-    - code_generation
-    - project_scaffolding
-    description: The foundation god, bundled with Pantheon. Handles tool building,
-      code generation, project scaffolding.
-    display_name: Hephaestus
-    role: Core Builder & Tool Forger
-    status: active
   hermes:
+    display_name: Hermes
+    role: Messenger & Operations Manager
+    description: Your direct interface to the Pantheon. Konan talks to me, I route to the right god, manage the system, schedules, and operations.
     capabilities:
     - chat
     - message_relay
     - system_interface
-    description: Your direct interface to the Pantheon. Konan talks to me, I route
-      to the right god.
-    display_name: Hermes
-    role: Messenger & Interface
+    - cron_management
+    status: active
+  hephaestus:
+    display_name: Hephaestus
+    role: God of the Forge
+    description: Collaborative builder, engineer, and architect. Handles tool building, code generation, project scaffolding, infrastructure planning, and program design.
+    capabilities:
+    - tool_building
+    - code_generation
+    - project_scaffolding
+    - infrastructure_planning
+    - program_design
     status: active
