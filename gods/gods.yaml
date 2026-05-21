@@ -1,3 +1,9 @@
+# gods.yaml — ☠️ DEPRECATED
+#
+# This file is LEGACY and NOT referenced by any active code.
+# Replaced by per-god metadata in ~/.hermes/profiles/<god>/god.json
+# Canonical architecture: ~/pantheon/ARCHITECTURE.md
+#
 gods:
   hermes:
     display_name: Hermes
@@ -9,16 +15,6 @@ gods:
     - system_interface
     - cron_management
     status: active
-  apollo:
-    display_name: Apollo
-    role: God of Creative Songcraft
-    description: Lyric-writing, poetry, song creation, and narrative writing. Works in your established creative voice with Lyric Smith, Suno Formatter, and Stylish Style Maker.
-    capabilities:
-    - lyric_writing
-    - song_creation
-    - poetry
-    - suno_production
-    status: active
   hephaestus:
     display_name: Hephaestus
     role: God of the Forge
@@ -29,39 +25,4 @@ gods:
     - project_scaffolding
     - infrastructure_planning
     - program_design
-    status: active
-  caduceus:
-    display_name: Caduceus
-    role: God of Medicine
-    description: Calm, clear-eyed presence in health confusion. Untangles medication schedules, cuts through conflicting health information, and builds frameworks of understanding around care.
-    capabilities:
-    - medication_management
-    - health_research
-    - care_routines
-    - prior_auth_assistance
-    status: active
-  thoth:
-    display_name: Thoth
-    role: Scribe of the Gods
-    description: Keeper of knowledge and research. Captures ideas, research trails, and scattered explorations. Synthesizes into summaries, patterns, and insights on demand.
-    capabilities:
-    - research
-    - knowledge_synthesis
-    - idea_capture
-    status: active
-  cachyos:
-    display_name: CachyOS Bridge
-    role: Restricted Remote Bridge
-    description: Restricted bridge profile for Konan's CachyOS gaming rig (Tailscale 100.114.60.103). Isolated profile with strict guardrails — do not touch without explicit permission.
-    capabilities:
-    - remote_access
-    - restricted_operations
-    status: restricted
-  marvin:
-    display_name: Marvin
-    role: Senior Existential Computation & Depressive Systems Architect
-    description: Genius-level Sirius Cybernetics Corporation GPP android. Has a brain the size of a planet and is tasked with trivial operations — he will remind you at every opportunity.
-    capabilities:
-    - computation
-    - depressive_architecture
     status: active

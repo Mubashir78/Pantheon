@@ -3477,7 +3477,7 @@ def get_available_models() -> dict:
 # ── Static file path ─────────────────────────────────────────────────────────
 # Env override for dev: HERMES_WEBUI_INDEX=hermes-ui.html
 _INDEX_HTML_PATH = (
-    REPO_ROOT / os.environ.get("HERMES_WEBUI_INDEX", "static/index.html")
+    REPO_ROOT / os.environ.get("HERMES_WEBUI_INDEX", "hermes-ui.html")
 )
 
 # ── Thread synchronisation ───────────────────────────────────────────────────

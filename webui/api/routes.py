@@ -3976,6 +3976,15 @@ a:hover{{text-decoration:underline}}
         except Exception as e:
             return j(handler, {"error": str(e), "gods": []})
 
+        # Load local download counts
+        _dl_path = os.path.join(os.path.dirname(__file__), "..", "data", "download_counts.json")
+        _dl_path = os.path.abspath(_dl_path)
+        try:
+            with open(_dl_path) as _f:
+                _dl_counts = _json.load(_f)
+        except (FileNotFoundError, _json.JSONDecodeError):
+            _dl_counts = {}
+
         god_dirs = [item for item in data if item.get("type") == "dir"]
         gods = []
         for g in god_dirs:
@@ -3987,8 +3996,37 @@ a:hover{{text-decoration:underline}}
                     soul_md = sresp.read().decode("utf-8")
             except Exception:
                 soul_md = ""
-            gods.append({"name": name, "soul": soul_md, "sha": g.get("sha", ""),
-                         "icon_url": f"https://raw.githubusercontent.com/{repo}/main/gods/{name}/icon.png"})
+
+            # Try to fetch metadata.json from the repo for display name / created_at
+            _meta_url = f"https://raw.githubusercontent.com/{repo}/main/gods/{name}/metadata.json"
+            _meta = {}
+            try:
+                _meta_req = _urllib.Request(_meta_url, headers={"User-Agent": "Pantheon/1.0"})
+                with _urllib.urlopen(_meta_req, timeout=8) as _mresp:
+                    _meta = _json.loads(_mresp.read().decode("utf-8"))
+            except Exception:
+                pass
+
+            # Local download stats for this god
+            _local = _dl_counts.get(name, {})
+            downloads = _local.get("downloads", 0)
+            created_at = _meta.get("created_at") or _local.get("first_summoned") or ""
+
+            gods.append({
+                "name": name,
+                "display_name": _meta.get("display_name", ""),
+                "domain": _meta.get("domain", ""),
+                "color": _meta.get("color", ""),
+                "description": _meta.get("description", ""),
+                "soul": soul_md,
+                "sha": g.get("sha", ""),
+                "icon_url": f"https://raw.githubusercontent.com/{repo}/main/gods/{name}/icon.png",
+                "downloads": downloads,
+                "created_at": created_at,
+                "skill_count": _meta.get("skill_count", 0),
+                "codex_count": _meta.get("codex_count", 0),
+                "mcp_count": _meta.get("mcp_count", 0),
+            })
 
         # Also grab repo metadata for star/fork counts
         try:
@@ -4136,16 +4174,97 @@ a:hover{{text-decoration:underline}}
     if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/codex-folders"):
         suffix = parsed.path[len("/api/gods/"):]
         god_name = suffix[:-len("/codex-folders")]
-        codex_dir = os.path.expanduser(f"~/athenaeum/Codex-{god_name.capitalize()}")
-        exclude = {"archive", "sessions", "distilled"}
-        folders = []
-        exists = os.path.isdir(codex_dir)
-        if exists:
-            for entry in sorted(os.listdir(codex_dir)):
-                full = os.path.join(codex_dir, entry)
-                if os.path.isdir(full) and entry not in exclude:
-                    folders.append(entry)
-        return j(handler, {"folders": folders, "exists": exists})
+        athenaeum_root = os.path.expanduser("~/athenaeum")
+        codexes = []
+        exists = False
+
+        # Try exact-capitalization first: Codex-{Name}
+        primary = f"Codex-{god_name.capitalize()}"
+        if os.path.isdir(os.path.join(athenaeum_root, primary)):
+            exists = True
+            codexes.append(primary)
+
+        # Also try Codex-God-{name} prefix variant
+        god_prefix = f"Codex-God-{god_name}"
+        if os.path.isdir(os.path.join(athenaeum_root, god_prefix)):
+            exists = True
+            if god_prefix not in codexes:
+                codexes.append(god_prefix)
+
+        return j(handler, {"codexes": codexes, "exists": exists})
+
+    # ── God Skills (GET) ──
+    if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/skills"):
+        suffix = parsed.path[len("/api/gods/"):]
+        god_name = suffix[:-len("/skills")]
+        from api.profiles import _resolve_profile_home_for_name
+        try:
+            god_home = _resolve_profile_home_for_name(god_name)
+        except Exception:
+            return bad(handler, f"Could not resolve profile for '{god_name}'")
+        # 1) Profile-level skills (files on disk in the god's skills dir)
+        skills_dir = os.path.join(str(god_home), "skills")
+        profile_names = set()
+        all_skills = []
+        if os.path.isdir(skills_dir):
+            for entry in sorted(os.listdir(skills_dir)):
+                full_path = os.path.join(skills_dir, entry)
+                if os.path.isdir(full_path):
+                    if entry.startswith(".") or entry in (".archive", ".curator_backups"):
+                        continue
+                    profile_names.add(entry)
+                    all_skills.append({
+                        "name": entry,
+                        "in_profile": True,
+                        "source": "profile",
+                        "category": "custom",
+                    })
+
+        # 2) All global skills from the skills hub
+        try:
+            from tools.skills_tool import skills_list as _skills_list
+            raw = _skills_list()
+            global_data = json.loads(raw) if isinstance(raw, str) else raw
+            global_skills = global_data.get("skills", []) if isinstance(global_data, dict) else []
+            for gs in global_skills:
+                sname = gs.get("name", "")
+                if sname and sname not in profile_names:
+                    all_skills.append({
+                        "name": sname,
+                        "in_profile": False,
+                        "source": "global",
+                        "category": gs.get("category", ""),
+                        "description": gs.get("description", ""),
+                    })
+        except Exception:
+            pass
+
+        all_skills.sort(key=lambda s: (0 if s.get("in_profile") else 1, s["name"].lower()))
+        return j(handler, {"skills": all_skills, "total": len(all_skills)})
+
+    # ── God MCP Servers (GET) ──
+    if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/mcp-servers"):
+        suffix = parsed.path[len("/api/gods/"):]
+        god_name = suffix[:-len("/mcp-servers")]
+        from api.profiles import _resolve_profile_home_for_name
+        try:
+            god_home = _resolve_profile_home_for_name(god_name)
+        except Exception:
+            return bad(handler, f"Could not resolve profile for '{god_name}'")
+        config_path = os.path.join(str(god_home), "config.yaml")
+        servers = []
+        if os.path.isfile(config_path):
+            import yaml
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f)
+                if config and isinstance(config, dict):
+                    mcp_servers = config.get("mcp_servers", {})
+                    if mcp_servers and isinstance(mcp_servers, dict):
+                        servers = sorted(mcp_servers.keys())
+            except Exception:
+                pass
+        return j(handler, {"servers": servers})
 
     # ── Athenaeum API ──────────────────────────────────────────────────────
     if parsed.path == "/api/athenaeum/list":
@@ -5245,7 +5364,17 @@ def handle_post(handler, parsed) -> bool:
                         if os.path.isfile(icon_path):
                             tar.add(icon_path, arcname=f"god-{god_name}/icon.png")
                         # Skills if requested
-                        if body.get("include_skills") is not False:
+                        selected_skills = body.get("selected_skills")
+                        if selected_skills is not None and isinstance(selected_skills, list):
+                            # selected_skills provided: if non-empty, include only those
+                            if len(selected_skills) > 0:
+                                skills_dir = os.path.join(god_home, "skills")
+                                for skill_name in selected_skills:
+                                    skill_path = os.path.join(skills_dir, skill_name)
+                                    if os.path.isdir(skill_path):
+                                        tar.add(skill_path, arcname=f"god-{god_name}/skills/{skill_name}")
+                            # EMPTY array [] = include NO skills, skip entirely
+                        elif body.get("include_skills") is not False:
                             skills_dir = os.path.join(god_home, "skills")
                             if os.path.isdir(skills_dir):
                                 tar.add(skills_dir, arcname=f"god-{god_name}/skills")
@@ -5257,6 +5386,31 @@ def handle_post(handler, parsed) -> bool:
                                 folder_path = os.path.join(athenaeum_root, folder)
                                 if os.path.isdir(folder_path):
                                     tar.add(folder_path, arcname=f"god-{god_name}/codex/{folder}")
+
+                        # Selected MCP servers
+                        selected_mcp = body.get("selected_mcp")
+                        if selected_mcp and isinstance(selected_mcp, list) and len(selected_mcp) > 0:
+                            config_yaml_path = os.path.join(god_home, "config.yaml")
+                            if os.path.isfile(config_yaml_path):
+                                import yaml
+                                try:
+                                    with open(config_yaml_path, "r", encoding="utf-8") as f:
+                                        full_config = yaml.safe_load(f)
+                                    if full_config and isinstance(full_config, dict):
+                                        mcp_section = full_config.get("mcp_servers", {})
+                                        if mcp_section and isinstance(mcp_section, dict):
+                                            filtered = {}
+                                            for srv in selected_mcp:
+                                                if srv in mcp_section:
+                                                    filtered[srv] = mcp_section[srv]
+                                            if filtered:
+                                                mcp_json_str = json.dumps({"mcp_servers": filtered}, indent=2)
+                                                mcp_data = mcp_json_str.encode("utf-8")
+                                                tarinfo = _tarfile.TarInfo(name=f"god-{god_name}/mcp.json")
+                                                tarinfo.size = len(mcp_data)
+                                                tar.addfile(tarinfo, _io.BytesIO(mcp_data))
+                                except Exception:
+                                    pass
 
                     tarball_data = buf.getvalue()
                     tarball_name = f"god-{god_name}-v1.tar.gz"
@@ -5374,10 +5528,30 @@ def handle_post(handler, parsed) -> bool:
             # Non-fatal — profile exists, soul file is bonus
             pass
 
+        # Bump local download count
+        import json as _json
+        _dl_path = os.path.join(os.path.dirname(__file__), "..", "data", "download_counts.json")
+        _dl_path = os.path.abspath(_dl_path)
+        try:
+            with open(_dl_path) as _f:
+                _dl_counts = _json.load(_f)
+        except (FileNotFoundError, _json.JSONDecodeError):
+            _dl_counts = {}
+        _entry = _dl_counts.get(god_name, {"downloads": 0})
+        _entry["downloads"] = _entry.get("downloads", 0) + 1
+        if "first_summoned" not in _entry:
+            from datetime import datetime as _dt
+            _entry["first_summoned"] = _dt.utcnow().isoformat() + "Z"
+        _dl_counts[god_name] = _entry
+        os.makedirs(os.path.dirname(_dl_path), exist_ok=True)
+        with open(_dl_path, "w") as _f:
+            _json.dump(_dl_counts, _f, indent=2)
+
         return j(handler, {
             "ok": True,
             "god": safe_name,
             "message": f"🌟 {god_name} has been summoned to Pantheon!",
+            "downloads": _entry["downloads"],
         })
 
     # ── God Submit to Pantheon-Summons (POST) ──
@@ -5660,9 +5834,10 @@ def handle_post(handler, parsed) -> bool:
         from api.god_runtime import invoke_god, sleep_god, refresh_god_statuses
 
         parts = parsed.path.split("/")
-        if len(parts) == 5 and parts[3] and parts[4] in ("invoke", "sleep"):
+        if len(parts) == 5 and parts[3] and parts[4] in ("invoke", "sleep", "exile"):
             god_name = parts[3]
             action = parts[4]
+
             if action == "invoke":
                 result = invoke_god(god_name)
                 # Also switch to the invoked god's profile
@@ -5678,9 +5853,49 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     extra_headers = None
                 return j(handler, result, extra_headers=extra_headers)
+
             elif action == "sleep":
                 result = sleep_god(god_name)
                 return j(handler, result)
+
+            elif action == "exile":
+                try:
+                    # 1. Sleep the god first (if running)
+                    try:
+                        sleep_god(god_name)
+                    except Exception:
+                        pass  # May already be stopped
+
+                    # 2. Delete the profile directory
+                    from api.profiles import _resolve_profile_home_for_name
+                    god_home = _resolve_profile_home_for_name(god_name)
+                    if god_home and god_home.exists():
+                        import shutil
+                        shutil.rmtree(str(god_home))
+                        logger.info("Exiled god '%s' — removed profile at %s", god_name, god_home)
+
+                    # 3. Clean up heartbeat artifacts
+                    heartbeat_dir = Path.home() / ".hermes" / "gods" / god_name
+                    if heartbeat_dir.exists():
+                        import shutil
+                        shutil.rmtree(str(heartbeat_dir))
+
+                    # 4. Clean up session artifacts for that god
+                    from api.config import SESSION_DIR
+                    if SESSION_DIR:
+                        import glob
+                        for f in glob.glob(os.path.join(SESSION_DIR, f"*{god_name}*")):
+                            try:
+                                os.remove(f)
+                            except Exception:
+                                pass
+
+                    refresh_god_statuses()
+                    return j(handler, {"ok": True, "message": f"🗑️ {god_name} has been exiled."})
+
+                except Exception as e:
+                    logger.exception("Failed to exile god '%s'", god_name)
+                    return bad(handler, f"Exile failed: {str(e)}", 500)
         return bad(handler, "Invalid god action", 400)
 
     # ── God Status Refresh (GET → POST as trigger) ──

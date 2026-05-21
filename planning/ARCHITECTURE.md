@@ -1,5 +1,10 @@
 # Pantheon — The God / Studio / Harness Model
 
+> **⚠️ PARTIALLY STALE — See canonical reference at `~/pantheon/ARCHITECTURE.md`**
+> This document describes the original conceptual architecture (God/Studio/Harness).
+> The harness layer was never implemented in code. For the current system architecture,
+> including file layouts, component dependencies, and deployment, see the canonical document.
+>
 > Source: Constitution Section 4
 > Read this document when: defining, editing, or instantiating any god, studio, or harness file; working on the registry; or making decisions about agent behavior and routing.
 

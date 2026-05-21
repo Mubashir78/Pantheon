@@ -31,10 +31,14 @@
 
     var userIcon = '';
     var userColor = '#6050b0';
+    var userName = '';
     try {
       userIcon = localStorage.getItem('hermes-user-icon') || '';
       userColor = localStorage.getItem('hermes-user-color') || '#6050b0';
+      userName = localStorage.getItem('hermes-user-name') || '';
     } catch(e) {}
+
+    var SWATCHES = ['#F5C542','#FF6B6B','#E8590C','#FFD43B','#69DB7C','#748FFC','#DA77F2','#FF8787','#20C997','#845EF7','#F783AC','#4DABF7','#51CF66','#FCC419','#9775FA','#FF922B'];
 
     panel.innerHTML = [
       '<div style="display:flex;align-items:center;justify-content:space-between;',
@@ -43,6 +47,12 @@
         '<button id="profile-panel-close" style="background:none;border:none;color:var(--text-muted);font-size:1.1rem;cursor:pointer;padding:4px 8px;border-radius:6px">✕</button>',
       '</div>',
       '<div id="profile-panel-body" style="flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:16px">',
+        // Name field
+        '<div style="border-bottom:1px solid var(--border,#3B4A50);padding-bottom:16px">',
+          '<label style="display:block;font-size:13px;font-weight:600;color:var(--text-primary,#EAE0D5);margin-bottom:6px">Your Name</label>',
+          '<input type="text" id="profile-name-input" value="' + userName.replace(/"/g,'&quot;') + '" placeholder="Enter your name..." style="width:100%;background:var(--bg-secondary,#11100E);border:1px solid var(--border,#3B4A50);border-radius:6px;padding:8px 12px;color:var(--text-primary,#EAE0D5);font-size:13px;outline:none;box-sizing:border-box">',
+          '<div style="font-size:10px;color:var(--text-secondary,#a6adc8);margin-top:4px">Appears on your messages instead of You</div>',
+        '</div>',
         // Icon upload section
         '<div style="border-bottom:1px solid var(--border,#3B4A50);padding-bottom:16px">',
           '<label style="display:block;font-size:13px;font-weight:600;color:var(--text-primary,#EAE0D5);margin-bottom:10px">Profile Icon</label>',
@@ -62,10 +72,18 @@
         // Color picker section
         '<div style="border-bottom:1px solid var(--border,#3B4A50);padding-bottom:16px">',
           '<label style="display:block;font-size:13px;font-weight:600;color:var(--text-primary,#EAE0D5);margin-bottom:10px">Accent Color</label>',
-          '<div style="display:flex;gap:12px;align-items:center">',
-            '<input type="color" id="profile-color-input" value="' + userColor + '" style="width:44px;height:44px;border:none;border-radius:8px;cursor:pointer;padding:0;background:none">',
-            '<span id="profile-color-hex" style="font-size:13px;color:var(--text-muted);font-family:monospace">' + userColor + '</span>',
-            '<div id="profile-color-swatch" style="width:28px;height:28px;border-radius:6px;background:' + userColor + ';border:1px solid var(--border,#3B4A50)"></div>',
+          '<div style="display:flex;flex-direction:column;gap:8px">',
+            '<div class="profile-color-grid" style="display:flex;flex-wrap:wrap;gap:6px">',
+              SWATCHES.map(function(c) {
+                var active = c === userColor ? ' active' : '';
+                return '<button type="button" class="profile-swatch' + active + '" style="width:28px;height:28px;border-radius:6px;background:' + c + ';border:2px solid ' + (c === userColor ? 'var(--accent,#7c6fe0)' : 'transparent') + ';cursor:pointer;padding:0;transition:transform 0.1s" data-color="' + c + '" title="' + c + '"></button>';
+              }).join(''),
+            '</div>',
+            '<div style="display:flex;gap:10px;align-items:center">',
+              '<input type="text" id="profile-color-input" value="' + userColor + '" placeholder="#HEX" style="width:90px;background:var(--bg-secondary,#11100E);border:1px solid var(--border,#3B4A50);border-radius:6px;padding:7px 10px;color:var(--text-primary,#EAE0D5);font-size:12px;font-family:monospace;outline:none">',
+              '<div id="profile-color-swatch" style="width:28px;height:28px;border-radius:6px;background:' + userColor + ';border:1px solid var(--border,#3B4A50);flex-shrink:0"></div>',
+              '<span id="profile-color-hex" style="font-size:12px;color:var(--text-muted);font-family:monospace">' + userColor + '</span>',
+            '</div>',
           '</div>',
         '</div>',
         // Info text
@@ -98,10 +116,38 @@
       updateProfilePreview();
     };
 
+    var nameInput = document.getElementById('profile-name-input');
+    if (nameInput) {
+      nameInput.oninput = function() {
+        var n = nameInput.value.trim();
+        try { localStorage.setItem('hermes-user-name', n); } catch(e) {}
+      };
+    }
+
+    // Color swatch clicks
+    document.querySelectorAll('.profile-swatch').forEach(function(btn) {
+      btn.onclick = function() {
+        var c = btn.dataset.color;
+        document.querySelectorAll('.profile-swatch').forEach(function(s) { s.style.borderColor = 'transparent'; });
+        btn.style.borderColor = 'var(--accent,#7c6fe0)';
+        var colorInput = document.getElementById('profile-color-input');
+        var colorHex = document.getElementById('profile-color-hex');
+        var swatch = document.getElementById('profile-color-swatch');
+        if (colorInput) colorInput.value = c;
+        if (colorHex) colorHex.textContent = c;
+        if (swatch) swatch.style.background = c;
+        try { localStorage.setItem('hermes-user-color', c); } catch(e) {}
+      };
+    });
+
     var colorInput = document.getElementById('profile-color-input');
     colorInput.oninput = function() {
       var c = colorInput.value;
       try { localStorage.setItem('hermes-user-color', c); } catch(e) {}
+      // Update swatch highlight
+      document.querySelectorAll('.profile-swatch').forEach(function(s) {
+        s.style.borderColor = s.dataset.color === c ? 'var(--accent,#7c6fe0)' : 'transparent';
+      });
       updateProfilePreview();
     };
 
