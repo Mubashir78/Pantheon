@@ -1271,7 +1271,12 @@ def _clean_session_model_provider(value: str | None) -> str | None:
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     model = str(model or "").strip()
     if model.startswith("@") and ":" in model:
-        provider_hint, bare_model = model[1:].rsplit(":", 1)
+        inner = model[1:]
+        if inner.startswith("custom:") and inner.count(":") >= 2:
+            prefix, provider_name, bare_model = inner.split(":", 2)
+            provider_hint = f"{prefix}:{provider_name}"
+        else:
+            provider_hint, bare_model = inner.split(":", 1)
         provider = _clean_session_model_provider(provider_hint)
         bare = bare_model.strip()
         if provider and bare:
@@ -3326,6 +3331,11 @@ a:hover{{text-decoration:underline}}
             bad(handler, str(exc), status=400)
         return True
 
+    # ── Olympus routes (multi-user auth, users, feature flags) ──
+    if parsed.path.startswith("/api/olympus/"):
+        from api.olympus_routes import handle_olympus_get
+        return handle_olympus_get(handler, parsed)
+
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
@@ -4660,6 +4670,11 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 500)
 
+    # ── Olympus routes (multi-user auth, users, feature flags) ──
+    if parsed.path.startswith("/api/olympus/"):
+        from api.olympus_routes import handle_olympus_post
+        return handle_olympus_post(handler, parsed, body)
+
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":
         provider_id = (body.get("provider") or "").strip().lower()
@@ -4813,6 +4828,86 @@ def handle_post(handler, parsed) -> bool:
             s.save()
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
+    # ── Model change notification helper ────────────────────────────────────
+
+
+    def _notify_model_change(
+        session_id: str,
+        new_model: str | None,
+        new_provider: str | None,
+        old_model: str | None = None,
+        old_provider: str | None = None,
+    ) -> None:
+        """Write a model-change event to Ichor and fire a god-notify notification.
+        
+        Called by /api/session/update when the user changes the session model.
+        This lets agents running in messaging sessions (Telegram, Discord, etc.)
+        detect that the model was changed while they were active, by querying
+        system_current_model (MCP) or polling Ichor events.
+        """
+        new_m = str(new_model or "?").strip()
+        old_m = str(old_model or "?").strip()
+        new_p = str(new_provider or "").strip()
+        old_p = str(old_provider or "").strip()
+        
+        # ── 1. Write to Ichor events table ──
+        try:
+            ichor_db = Path.home() / ".hermes" / "ichor.db"
+            if ichor_db.exists():
+                conn = sqlite3.connect(str(ichor_db))
+                conn.execute(
+                    "INSERT INTO ichor_events "
+                    "(session_id, event_type, subject, predicate, object, raw_text, god_name, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        "model_change",
+                        f"model.{new_m}.{new_p}" if new_p else f"model.{new_m}",
+                        "changed_to" if old_m != new_m else "provider_changed_to",
+                        old_m if old_m != new_m else old_p,
+                        json.dumps({
+                            "session_id": session_id,
+                            "previous_model": old_m,
+                            "previous_provider": old_p,
+                            "new_model": new_m,
+                            "new_provider": new_p,
+                            "timestamp": time.time(),
+                            "iso_timestamp": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        }),
+                        "hermes",
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    ),
+                )
+                conn.commit()
+                conn.close()
+        except Exception:
+            logger.exception("Failed to write model_change event to Ichor")
+        
+        # ── 2. Fire god-notify notification ──
+        # This shows up in the Web UI notification bell and PWA push.
+        try:
+            title = f"🔄 Model changed"
+            body_parts = [f"Session: {session_id[:12]}…"]
+            if old_m != new_m:
+                body_parts.append(f"{old_m} → {new_m}")
+            if old_p != new_p and new_p:
+                body_parts.append(f"({new_p})")
+        
+            god_notify = str(Path.home() / ".local" / "bin" / "god-notify")
+            if os.path.isfile(god_notify):
+                subprocess.Popen(
+                    [god_notify, "Hephaestus", "info", title, " — ".join(body_parts)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            logger.exception("Failed to fire god-notify for model change")
+
+
+# ── Session Update (POST) ─────────────────────────────────────────────────
+
     if parsed.path == "/api/session/update":
         try:
             require(body, "session_id")
@@ -4823,10 +4918,13 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         old_ws = getattr(s, "workspace", "")
+        old_model = getattr(s, "model", None)
+        old_provider = getattr(s, "model_provider", None)
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
             return bad(handler, str(e))
+        model_provider_changed = False
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
@@ -4838,7 +4936,22 @@ def handle_post(handler, parsed) -> bool:
                 if model is not None:
                     s.model = model
                 s.model_provider = provider
+                model_provider_changed = (
+                    getattr(s, "model", None) != old_model
+                    or getattr(s, "model_provider", None) != old_provider
+                )
             s.save()
+            if model_provider_changed:
+                from api.config import _evict_session_agent
+                _evict_session_agent(body["session_id"])
+                # Fire model-change notification and Ichor event
+                _notify_model_change(
+                    session_id=body["session_id"],
+                    new_model=getattr(s, "model", None),
+                    new_provider=getattr(s, "model_provider", None),
+                    old_model=old_model,
+                    old_provider=old_provider,
+                )
         if str(old_ws or "") != str(new_ws or ""):
             try:
                 from api.terminal import close_terminal
@@ -5268,6 +5381,28 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── God Management: Create New God (POST) ──
+    if parsed.path.rstrip("/") == "/api/gods":
+        god_name = (body or {}).get("name", "").strip()
+        if not god_name:
+            return bad(handler, "Missing 'name' field", status=400)
+        from api.profiles import create_profile_api, _resolve_profile_home_for_name, _write_god_metadata
+
+        try:
+            profile = create_profile_api(god_name)
+        except Exception as e:
+            return bad(handler, f"Failed to create god profile: {e}", status=400)
+
+        # Write initial god.json metadata
+        god_home = _resolve_profile_home_for_name(god_name)
+        metadata = {
+            "display_name": (body or {}).get("display_name", god_name.capitalize()),
+            "color": (body or {}).get("color", "#748FFC"),
+            "domain": (body or {}).get("domain", "Specialist"),
+        }
+        _write_god_metadata(god_home, metadata)
+        return j(handler, {"ok": True, "god": {**profile, "god": metadata}}, status=201)
 
     # ── God Management: Icon Upload (POST) ──
     if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/icon"):
@@ -7049,6 +7184,10 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    # ── Olympus routes ──
+    if parsed.path.startswith("/api/olympus/"):
+        from api.olympus_routes import handle_olympus_patch
+        return handle_olympus_patch(handler, parsed, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
@@ -7056,6 +7195,40 @@ def handle_patch(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "PATCH")
         return True
+
+    # ── God Profile Update (PATCH) — update display_name, color, domain ──
+    if parsed.path.startswith("/api/gods/") and not parsed.path.endswith("/icon"):
+        # Parse: /api/gods/{name}
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 3:
+            god_name = parts[2]
+            from api.profiles import (
+                _resolve_profile_home_for_name,
+                _write_god_metadata,
+                _read_god_metadata,
+                _is_root_profile,
+                _DEFAULT_HERMES_HOME,
+            )
+
+            try:
+                god_home = _resolve_profile_home_for_name(god_name)
+            except Exception:
+                return bad(handler, f"God '{god_name}' not found", status=404)
+
+            # Root profiles (default/hermes) have god.json at the base level
+            if _is_root_profile(god_name):
+                god_home = _DEFAULT_HERMES_HOME
+
+            metadata = _read_god_metadata(god_home)
+            # Only update provided fields
+            for field in ("display_name", "color", "domain", "icon"):
+                if field in body:
+                    metadata[field] = body[field]
+
+            # Ensure the target directory exists before writing
+            god_home.mkdir(parents=True, exist_ok=True)
+            _write_god_metadata(god_home, metadata)
+            return j(handler, {"ok": True, "god": metadata})
     return False
 
 
@@ -7064,6 +7237,10 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    # ── Olympus routes ──
+    if parsed.path.startswith("/api/olympus/"):
+        from api.olympus_routes import handle_olympus_delete
+        return handle_olympus_delete(handler, parsed)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
@@ -7071,6 +7248,23 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+
+    # ── God Profile Delete (DELETE) — remove a god profile ──
+    if parsed.path.startswith("/api/gods/"):
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 3:
+            god_name = parts[2]
+            from api.profiles import delete_profile_api, _is_root_profile
+
+            if _is_root_profile(god_name) or god_name.lower() == 'hephaestus':
+                return bad(handler, "Cannot delete this god — it is a core infrastructure profile.", status=400)
+            try:
+                result = delete_profile_api(god_name)
+                return j(handler, {"ok": True, "result": result})
+            except ValueError as e:
+                return bad(handler, str(e), status=400)
+            except Exception as e:
+                return bad(handler, f"Failed to delete god: {e}", status=500)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
@@ -8683,6 +8877,12 @@ def _handle_chat_start(handler, body):
                 return bad(handler, "invalid profile", 400)
         except ImportError:
             requested_profile = ""
+    # When the cookie profile (authoritative per-client selector) differs from
+    # the body-sent profile (which may be stale after a full page reload that
+    # skipped React state persistence), prefer the cookie profile so sessions
+    # are never tagged with the wrong god (#profile-bug-1).
+    if cookie_profile and cookie_profile != requested_profile:
+        requested_profile = cookie_profile
     if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
         has_persisted_turns = bool(
             getattr(s, "messages", None)
