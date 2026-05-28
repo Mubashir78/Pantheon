@@ -169,14 +169,17 @@ PYTHON_EXE = _discover_python(_AGENT_DIR)
 # when the webui is running under system Python (e.g. via systemd).
 
 if _AGENT_DIR is not None:
-    if str(_AGENT_DIR) not in sys.path:
-        sys.path.append(str(_AGENT_DIR))
-
-    # ── Venv site-packages ──────────────────────────────────────────
+    # ── Venv site-packages (appended FIRST so they take precedence) ──
+    # The venv has the *installed* hermes_cli with full board support.
+    # The source checkout may be an older version. Append venv before
+    # the source dir so `import hermes_cli.kanban_db` finds the installed one.
     for _venv_candidate in (_AGENT_DIR / "venv", _AGENT_DIR / ".venv"):
         _sp = _venv_candidate / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
         if _sp.is_dir() and str(_sp) not in sys.path:
             sys.path.append(str(_sp))
+
+    if str(_AGENT_DIR) not in sys.path:
+        sys.path.append(str(_AGENT_DIR))
 
     _HERMES_FOUND = True
 else:
