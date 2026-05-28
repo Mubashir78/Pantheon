@@ -4564,6 +4564,10 @@ function renderMessages(options){
   });
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
+  // Spacer pushes messages to the bottom when content is shorter than the pane
+  let spacer=inner.querySelector('.msg-spacer');
+  if(!spacer){spacer=document.createElement('div');spacer.className='msg-spacer';}
+  inner.appendChild(spacer);
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
   const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
@@ -7141,6 +7145,7 @@ async function loadGodRoster() {
     const activeGod = data.gods.find(g => g.is_active);
     if (activeGod) {
       document.documentElement.style.setProperty('--god-color', activeGod.color);
+      document.documentElement.style.setProperty('--god-accent', activeGod.color);
       document.documentElement.style.setProperty('--god-color-dim', activeGod.color + '66');
       document.documentElement.style.setProperty('--god-color-bg', activeGod.color + '18');
 
@@ -7151,6 +7156,7 @@ async function loadGodRoster() {
     } else {
       // Reset god theming
       document.documentElement.style.removeProperty('--god-color');
+      document.documentElement.style.removeProperty('--god-accent');
       document.documentElement.style.removeProperty('--god-color-dim');
       document.documentElement.style.removeProperty('--god-color-bg');
     }

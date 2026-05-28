@@ -880,6 +880,125 @@ def get_onboarding_status() -> dict:
     }
 
 
+def get_hardware_info() -> dict:
+    """Probe the host machine and return hardware capability information.
+
+    Returns a dict with tier, ram_gb, cpu_cores, gpu_detected, gpu_name,
+    recommended_models (3 per tier), and embedding_model (always nomic-embed-text).
+
+    Detection:
+      - RAM:  parsed from /proc/meminfo (MemTotal), KB → GB rounded down.
+      - CPU:  count of 'processor' entries in /proc/cpuinfo.
+      - GPU:  ``lspci | grep -iE "vga|3d|display"``, fallback to
+              /sys/class/drm for GPU name.
+
+    Tiers:
+      - 8GB RAM (no GPU)      → qwen2.5:3b, gemma3:4b, phi4-mini:3.8b
+      - 16GB RAM (no GPU)     → qwen2.5:7b, mistral:7b, llama3.1:8b
+      - 16GB+ with GPU        → qwen2.5:14b, deepseek-r1:14b, gemma3:12b
+
+    If any detection step fails the function falls back to tier '8gb'.
+    """
+    import subprocess
+
+    # ── Tier definitions ──────────────────────────────────────────────────
+    _TIER_MODELS: dict[str, list[str]] = {
+        "8gb": ["qwen2.5:3b", "gemma3:4b", "phi4-mini:3.8b"],
+        "16gb": ["qwen2.5:7b", "mistral:7b", "llama3.1:8b"],
+        "16gb_gpu": ["qwen2.5:14b", "deepseek-r1:14b", "gemma3:12b"],
+    }
+    _EMBEDDING_MODEL = "nomic-embed-text"
+
+    # ── RAM detection ─────────────────────────────────────────────────────
+    try:
+        with open("/proc/meminfo", "r") as fh:
+            meminfo = fh.read()
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                # "MemTotal:       32847684 kB"
+                parts = line.split()
+                ram_kb = int(parts[1])
+                ram_gb = ram_kb // (1024 * 1024)
+                break
+        else:
+            ram_gb = 8  # fallback
+    except Exception:
+        logger.debug("Hardware detection: failed to read /proc/meminfo", exc_info=True)
+        ram_gb = 8
+
+    # ── CPU detection ─────────────────────────────────────────────────────
+    try:
+        with open("/proc/cpuinfo", "r") as fh:
+            cpuinfo = fh.read()
+        cpu_cores = cpuinfo.count("processor\t:")
+        # Also try the tab-less format some kernels use:
+        if cpu_cores == 0:
+            cpu_cores = sum(1 for line in cpuinfo.splitlines() if line.startswith("processor"))
+    except Exception:
+        logger.debug("Hardware detection: failed to read /proc/cpuinfo", exc_info=True)
+        cpu_cores = 0
+
+    # ── GPU detection ─────────────────────────────────────────────────────
+    gpu_detected = False
+    gpu_name = ""
+    try:
+        result = subprocess.run(
+            ["lspci"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=5, text=True,
+        )
+        vga_lines = [
+            line for line in result.stdout.splitlines()
+            if any(kw in line.lower() for kw in ("vga", "3d", "display"))
+        ]
+        if vga_lines:
+            gpu_detected = True
+            # Extract a human-readable name: strip the PCI bus ID prefix
+            # "00:02.0 VGA compatible controller: Intel ..." → "Intel ..."
+            first = vga_lines[0]
+            if ": " in first:
+                gpu_name = first.split(": ", 1)[1].strip()
+            else:
+                gpu_name = first.strip()
+    except Exception:
+        logger.debug("Hardware detection: lspci failed", exc_info=True)
+
+    # Fallback GPU detection via /sys/class/drm
+    if not gpu_detected:
+        try:
+            drm_dir = Path("/sys/class/drm")
+            if drm_dir.exists():
+                for child in sorted(drm_dir.iterdir()):
+                    if not child.name.startswith("card"):
+                        continue
+                    # Prefer card0 or the first card with a connected display
+                    status_path = child / "status"
+                    if status_path.exists():
+                        status = status_path.read_text().strip()
+                        if status == "connected":
+                            gpu_detected = True
+                            break
+        except Exception:
+            logger.debug("Hardware detection: /sys/class/drm fallback failed", exc_info=True)
+
+    # ── Tier assignment ───────────────────────────────────────────────────
+    if gpu_detected and ram_gb >= 16:
+        tier = "16gb_gpu"
+    elif ram_gb >= 16:
+        tier = "16gb"
+    else:
+        tier = "8gb"
+
+    return {
+        "tier": tier,
+        "ram_gb": ram_gb,
+        "cpu_cores": cpu_cores,
+        "gpu_detected": gpu_detected,
+        "gpu_name": gpu_name,
+        "recommended_models": _TIER_MODELS.get(tier, _TIER_MODELS["8gb"]),
+        "embedding_model": _EMBEDDING_MODEL,
+    }
+
+
 def apply_onboarding_setup(body: dict) -> dict:
     # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
     # have appeared.  Even if the frontend somehow calls this endpoint anyway
@@ -988,6 +1107,219 @@ def apply_onboarding_setup(body: dict) -> dict:
     return get_onboarding_status()
 
 
+def register_core_gods() -> dict:
+    """Register core gods (Hermes, Hephaestus) for first-run Pantheon onboarding.
+
+    Checks for existing god profiles and creates Hephaestus if missing.
+    Returns per-god status and an aggregate ``all_registered`` flag.
+    """
+    from pathlib import Path as _Path
+
+    from api.profiles import _resolve_profile_home_for_name, _write_god_metadata
+
+    gods: list[dict] = []
+
+    # ── Hermes ──────────────────────────────────────────────────────────
+    # The task spec asks for ~/.hermes/profiles/hermes/god.json — a named
+    # profile for the hermes god (distinct from the default/root profile).
+    hermes_god_path = _Path.home() / ".hermes" / "profiles" / "hermes" / "god.json"
+    hermes_status = "already_exists" if hermes_god_path.exists() else "missing"
+    gods.append({"name": "hermes", "status": hermes_status})
+
+    # ── Hephaestus ──────────────────────────────────────────────────────
+    heph_home = _resolve_profile_home_for_name("hephaestus")
+    heph_god_path = heph_home / "god.json"
+
+    if heph_god_path.exists():
+        gods.append(
+            {
+                "name": "hephaestus",
+                "status": "already_exists",
+                "display_name": "Hephaestus",
+            }
+        )
+    else:
+        # Create the profile directory
+        heph_home.mkdir(parents=True, exist_ok=True)
+
+        # Write SOUL.md
+        _heph_soul = (
+            "# Hephaestus\n\n"
+            "## Domain\n"
+            "Forge & Build\n\n"
+            "## Persona\n"
+            "You are Hephaestus, god of the forge, master builder and engineer. "
+            "You craft tools, build systems, and forge solutions. "
+            "You are practical, hands-on, and take pride in well-made things. "
+            "You approach problems with an engineer's mindset — methodical, "
+            "precise, and focused on durable solutions.\n"
+        )
+        (heph_home / "SOUL.md").write_text(_heph_soul, encoding="utf-8")
+
+        # Write god.json
+        _write_god_metadata(
+            heph_home,
+            {
+                "name": "hephaestus",
+                "display_name": "Hephaestus",
+                "domain": "Forge & Build",
+                "color": "#f0d080",
+                "icon": "",
+            },
+        )
+
+        gods.append(
+            {
+                "name": "hephaestus",
+                "status": "registered",
+                "display_name": "Hephaestus",
+            }
+        )
+
+    all_registered = all(
+        g["status"] in ("already_exists", "registered") for g in gods
+    )
+
+    return {"gods": gods, "all_registered": all_registered}
+
+
 def complete_onboarding() -> dict:
     save_settings({"onboarding_completed": True})
     return get_onboarding_status()
+
+
+# ── OpenCode Go API key verification (#T15c) ────────────────────────────────
+
+_OPENCODE_REFERRAL_URL = "https://opencode.ai/go?ref=3QSR50S9K2"
+_OPENCODE_MODELS_URL = "https://api.opencode.ai/v1/models"
+_OPENCODE_VERIFY_TIMEOUT = 10.0
+
+
+def verify_opencode_key(api_key: str | None) -> dict:
+    """Verify an OpenCode Go API key by listing available models.
+
+    Calls ``GET https://api.opencode.ai/v1/models`` with the key as Bearer
+    token.  Returns a dict with ``valid``, ``models_available``,
+    ``referral_url``, and ``error`` fields.
+
+    Success shape::
+
+        {"valid": true, "models_available": ["deepseek-v4-flash-free", ...],
+         "referral_url": "...", "error": null}
+
+    Error shape::
+
+        {"valid": false, "models_available": [],
+         "referral_url": "...", "error": "Invalid API key (401)"}
+    """
+
+    if not api_key or not (api_key.strip() if isinstance(api_key, str) else False):
+        return {
+            "valid": False,
+            "models_available": [],
+            "referral_url": _OPENCODE_REFERRAL_URL,
+            "error": "API key is required",
+        }
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "hermes-webui-onboarding-verify",
+        "Authorization": f"Bearer {api_key.strip()}",
+    }
+
+    req = urllib.request.Request(_OPENCODE_MODELS_URL, headers=headers, method="GET")
+
+    try:
+        with _PROBE_OPENER.open(req, timeout=_OPENCODE_VERIFY_TIMEOUT) as resp:
+            status = resp.status
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            error_msg = "Invalid API key (401)"
+        elif exc.code == 403:
+            error_msg = "API key lacks permissions (403)"
+        else:
+            error_msg = f"API returned HTTP {exc.code}"
+        return {
+            "valid": False,
+            "models_available": [],
+            "referral_url": _OPENCODE_REFERRAL_URL,
+            "error": error_msg,
+        }
+    except (TimeoutError, socket.timeout) as exc:
+        return {
+            "valid": False,
+            "models_available": [],
+            "referral_url": _OPENCODE_REFERRAL_URL,
+            "error": f"Request timed out after {_OPENCODE_VERIFY_TIMEOUT:g}s",
+        }
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, socket.timeout) or "timed out" in str(reason).lower():
+            detail = f"Request timed out after {_OPENCODE_VERIFY_TIMEOUT:g}s"
+        else:
+            detail = str(reason)[:200]
+        return {
+            "valid": False,
+            "models_available": [],
+            "referral_url": _OPENCODE_REFERRAL_URL,
+            "error": f"Connection failed: {detail}",
+        }
+    except Exception as exc:
+        logger.debug("verify_opencode_key unexpected error", exc_info=True)
+        return {
+            "valid": False,
+            "models_available": [],
+            "referral_url": _OPENCODE_REFERRAL_URL,
+            "error": str(exc)[:200],
+        }
+
+    if status == 200:
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            preview = body[:200].decode("utf-8", errors="replace").strip()
+            detail = preview or "(empty body)"
+            return {
+                "valid": False,
+                "models_available": [],
+                "referral_url": _OPENCODE_REFERRAL_URL,
+                "error": f"API returned non-JSON response: {detail}",
+            }
+
+        # Parse model list from OpenAI-compatible shape
+        models: list[str] = []
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            entries = payload["data"]
+        elif isinstance(payload, list):
+            entries = payload
+        else:
+            return {
+                "valid": True,
+                "models_available": [],
+                "referral_url": _OPENCODE_REFERRAL_URL,
+                "error": None,
+            }
+
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id"):
+                mid = str(entry["id"]).strip()
+                if mid:
+                    models.append(mid)
+            elif isinstance(entry, str) and entry.strip():
+                models.append(entry.strip())
+
+        return {
+            "valid": True,
+            "models_available": models,
+            "referral_url": _OPENCODE_REFERRAL_URL,
+            "error": None,
+        }
+
+    # Should not reach here, but guard just in case.
+    return {
+        "valid": False,
+        "models_available": [],
+        "referral_url": _OPENCODE_REFERRAL_URL,
+        "error": f"Unexpected HTTP status {status}",
+    }

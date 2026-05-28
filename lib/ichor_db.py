@@ -72,6 +72,8 @@ class IchorDB:
         source: Optional[str] = None,
         raw_text: Optional[str] = None,
         god_name: Optional[str] = None,
+        direction: Optional[str] = None,
+        peer_god: Optional[str] = None,
     ) -> int:
         """Insert a new event into the database.
 
@@ -85,6 +87,8 @@ class IchorDB:
             source: Origin tier — 'tier_a', 'tier_b', or 'manual'.
             raw_text: Original raw text the event was extracted from.
             god_name: Name of the god that generated this event.
+            direction: Optional 'user→agent', 'agent→user', 'agent→agent', etc.
+            peer_god: Optional peer god name for cross-god events.
 
         Returns:
             The row ID of the newly inserted event.
@@ -93,24 +97,27 @@ class IchorDB:
             sqlite3.Error: If the insert fails.
         """
         conn = self.connect()
+        # Dynamic column list — include direction/peer_god if provided
+        columns = [
+            "session_id", "event_type", "subject", "predicate", "object",
+            "confidence", "source", "raw_text", "god_name",
+        ]
+        values = [
+            session_id, event_type, subject, predicate, object,
+            confidence, source, raw_text, god_name,
+        ]
+        if direction is not None:
+            columns.append("direction")
+            values.append(direction)
+        if peer_god is not None:
+            columns.append("peer_god")
+            values.append(peer_god)
+
+        placeholders = ", ".join("?" * len(columns))
+        col_list = ", ".join(columns)
         cursor = conn.execute(
-            """
-            INSERT INTO ichor_events
-                (session_id, event_type, subject, predicate, object,
-                 confidence, source, raw_text, god_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                event_type,
-                subject,
-                predicate,
-                object,
-                confidence,
-                source,
-                raw_text,
-                god_name,
-            ),
+            f"INSERT INTO ichor_events ({col_list}) VALUES ({placeholders})",
+            values,
         )
         conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]

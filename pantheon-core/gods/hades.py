@@ -14,11 +14,15 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,16 @@ INDEX_DESCRIPTION = (
 )
 
 # Files older than this (in days) are archive candidates if not linked in the graph
+# Add ~/pantheon/lib to sys.path for ichor/graph imports
+_LIB_PATH = f"{_REAL_HOME}/pantheon/lib"
+if _LIB_PATH not in sys.path:
+    sys.path.insert(0, _LIB_PATH)
+
+# LLM distillation endpoint (opencode-go)
+LLM_API_KEY = os.environ.get("OPENCODE_GO_API_KEY", "")
+LLM_BASE_URL = os.environ.get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1")
+LLM_MODEL = os.environ.get("HADES_DISTILL_MODEL", "deepseek-v4-flash")
+
 STALE_THRESHOLD_DAYS = 90
 
 # Codex exclusion list — system codices we don't auto-archive or auto-distill
@@ -44,11 +58,39 @@ SYSTEM_CODEXES = {"Codex-Pantheon", "Codex-Apollo"}
 # knowledge. The naming convention itself is the exclusion mechanism.
 GOD_CODEX_PREFIX = "Codex-God-"
 
-KNOWN_CODEXES = [
+def discover_codexes() -> List[str]:
+    """Auto-discover all Codex-* directories in the Athenaeum.
+
+    Filters out:
+    - Codex-God-* (god memory — active, not canonical)
+    - Directories without any embeddable files
+    """
+    codexes = []
+    if not ATHENAEUM_ROOT.is_dir():
+        return KNOWN_CODEXES_FALLBACK
+
+    for d in sorted(ATHENAEUM_ROOT.iterdir()):
+        if not d.is_dir():
+            continue
+        name = d.name
+        if not name.startswith("Codex-"):
+            continue
+        if name.startswith(GOD_CODEX_PREFIX):
+            continue
+        codexes.append(name)
+
+    return codexes if codexes else KNOWN_CODEXES_FALLBACK
+
+
+# Hardcoded fallback kept for backwards compat / when filesystem is unavailable
+KNOWN_CODEXES_FALLBACK = [
     "Codex-Forge", "Codex-Pantheon", "Codex-Infrastructure",
     "Codex-SKC", "Codex-Fiction", "Codex-Asclepius", "Codex-General",
     "Codex-Claude", "Codex-User", "Codex-Work", "Codex-Apollo",
 ]
+
+# Resolve at import time
+KNOWN_CODEXES = discover_codexes()
 
 EMBEDDABLE_EXTS = {".md", ".txt", ".json", ".yaml", ".yml"}
 DISTILLED_DIR_NAME = "distilled"
@@ -76,10 +118,19 @@ class HadesReport:
         self.distillation: Dict[str, Any] = {
             "sessions_processed": 0,
             "distilled_files_written": 0,
+            "files_embedded": 0,
+            "files_graphed": 0,
             "by_codex": {},
         }
         self.archive: Dict[str, Any] = {
-            "files_archived": 0,
+            "files_archived": 0,         # moved to archive/ (Elysium)
+            "asphodel_count": 0,          # orphaned + archived (Asphodel corridor)
+            "tartarus_candidates": 0,     # deletion-marked (Tartarus)
+            "errors": [],
+        }
+        self.deletion: Dict[str, Any] = {
+            "candidates": [],
+            "files_cleared": 0,
             "errors": [],
         }
         self.suggestions: List[Dict] = []
@@ -104,6 +155,7 @@ class HadesReport:
             "health": self.health,
             "distillation": self.distillation,
             "archive": self.archive,
+            "deletion": self.deletion,
             "extraction": self.extraction,
             "shared_context": self.shared_context,
             "suggestions": self.suggestions,
@@ -176,15 +228,41 @@ class HadesReport:
             lines.append(f"\n## 🔄 Distillation")
             lines.append(f"- Sessions processed: {dist.get('sessions_processed', 0)}")
             lines.append(f"- Distilled files written: {dist.get('distilled_files_written', 0)}")
+            lines.append(f"- Embedded to ChromaDB: {dist.get('files_embedded', 0)}")
+            lines.append(f"- Entities extracted to graph: {dist.get('files_graphed', 0)}")
+        elif dist.get("sessions_processed", 0) > 0:
+            lines.append(f"\n## 🔄 Distillation")
+            lines.append(f"- Sessions processed: {dist.get('sessions_processed', 0)}")
+            lines.append(f"- Distilled files available: {dist.get('distilled_files_available', '?')} across all codexes")
+            if dist.get("files_embedded", 0) > 0:
+                lines.append(f"- Embedded to ChromaDB: {dist.get('files_embedded', 0)}")
+            else:
+                lines.append(f"- Embedded to ChromaDB: {dist.get('files_embedded', 0)}")
+            lines.append(f"- Entities extracted to graph: {dist.get('files_graphed', 0)}")
 
         # Archive summary
         arch = self.archive
-        if arch.get("files_archived", 0) > 0 or len(arch.get("candidates", [])) > 0:
+        if arch.get("files_archived", 0) > 0 or arch.get("asphodel_count", 0) > 0 or arch.get("tartarus_candidates", 0) > 0:
             lines.append("")
-            lines.append(f"## 📦 Archive")
-            lines.append(f"- Files archived: {arch.get('files_archived', 0)}")
-            if arch.get("candidates"):
-                lines.append(f"- Candidates found: {len(arch['candidates'])}")
+            lines.append("## 🏛️ Underworld — Archive Management")
+            elysium = arch.get("files_archived", 0)
+            asphodel = arch.get("asphodel_count", 0)
+            tartarus = arch.get("tartarus_candidates", 0)
+            if elysium > 0:
+                lines.append(f"- **Elysium** — {elysium} files archived (linked content preserved)")
+            if asphodel > 0:
+                lines.append(f"- **Asphodel Meadows** — {asphodel} orphaned files in 90-day purgatory")
+            if tartarus > 0:
+                lines.append(f"- **Tartarus** — {tartarus} files in 15-day deletion queue")
+            if arch.get("errors"):
+                for e in arch["errors"]:
+                    lines.append(f"- ⚠️ {e}")
+        elif self.deletion.get("files_cleared", 0) > 0 or self.deletion.get("candidates"):
+            lines.append("")
+            lines.append("## 🏛️ Underworld — Tartarus Sweep")
+            lines.append(f"- Files cleared by Fates: {self.deletion.get('files_cleared', 0)}")
+            if self.deletion.get("candidates"):
+                lines.append(f"- Deletion candidates remaining: {len(self.deletion['candidates'])}")
 
         # Entity extraction summary
         extr = self.extraction
@@ -391,8 +469,8 @@ def run_health_checks() -> Dict[str, Any]:
         "chroma_count": None,
     }
 
-    # Try to read ChromaDB for comparison
-    chroma_counts: Dict[str, int] = {}
+    # Try to read ChromaDB for comparison — use metadata path matching like spot-fix
+    chroma_paths: Dict[str, set] = {}
     try:
         import chromadb
         if CHROMA_DIR.is_dir():
@@ -406,13 +484,24 @@ def run_health_checks() -> Dict[str, Any]:
                         parsed = "Codex-" + parts[2].replace("_", "-")
                         # Case-insensitive match against KNOWN_CODEXES for correct casing
                         matched = next((c for c in KNOWN_CODEXES if c.lower() == parsed.lower()), None)
-                        if matched:
-                            chroma_counts[matched] = col.count()
-                        else:
-                            chroma_counts[parsed] = col.count()
+                        codex_key = matched or parsed
+                        if col.count() == 0:
+                            chroma_paths[codex_key] = set()
+                            continue
+                        # Walk metadata to get all source paths
+                        r = col.get(include=["metadatas"])
+                        sources: set = set()
+                        if r and r.get("metadatas"):
+                            for m in r["metadatas"]:
+                                if m and "source" in m:
+                                    src = m["source"]
+                                    # Skip old static "distilled" entries — they're schema-stale
+                                    if src in ("distilled", "raw", "text"):
+                                        continue
+                                    sources.add(src)
+                        chroma_paths[codex_key] = sources
                 except Exception:
                     pass
-        health["chroma_count"] = sum(chroma_counts.values()) if chroma_counts else None
     except ImportError:
         pass  # chromadb not available
 
@@ -444,24 +533,33 @@ def run_health_checks() -> Dict[str, Any]:
         if still_missing:
             health["missing_indexes"].extend(still_missing)
 
-        # Chroma vs FS comparison
-        embeddable_count = len(info["embeddable"])
-        chroma_count = chroma_counts.get(codex_name, 0)
-        health["codexes"][codex_name]["embedded"] = chroma_count if chroma_count else 0
-        health["chroma_vs_fs"][codex_name] = {
-            "chroma": chroma_count,
-            "fs_embeddable": embeddable_count,
-            "delta": chroma_count - embeddable_count,
-        }
+        # Chroma vs FS comparison — path-based matching (same approach as spot-fix)
+        chroma_sources = chroma_paths.get(codex_name, set())
 
-        if chroma_count > embeddable_count:
-            # Chroma has more than filesystem — some are orphaned
-            pass  # Detailed orphan detection requires iterating IDs
-        elif embeddable_count > chroma_count:
-            for f in info["embeddable"]:
-                health["orphans"]["fs_unembedded"].append(str(f.relative_to(ATHENAEUM_ROOT)))
-                if len(health["orphans"]["fs_unembedded"]) > 50:
-                    break
+        # All embeddable files on disk across all subdirs (root + distilled + sessions)
+        disk_files: set = set()
+        for f in info["files"] + info["distilled"] + info["sessions"]:
+            disk_files.add(str(f.absolute()))
+
+        # Files present in both Chroma and disk
+        actually_embedded = disk_files & chroma_sources
+
+        # Files on disk but not in Chroma
+        fs_unembedded = disk_files - chroma_sources
+
+        # In Chroma but not on disk (orphans from old metadata schema or deleted files)
+        chroma_only = chroma_sources - disk_files
+
+        # "Embedded" = root-level files that have a matching Chroma entry
+        root_files_set = set(str(f.absolute()) for f in info["files"])
+        embedded_root = len(root_files_set & chroma_sources)
+        health["codexes"][codex_name]["embedded"] = embedded_root
+
+        for f in sorted(list(fs_unembedded))[:50]:
+            rel = Path(f).relative_to(ATHENAEUM_ROOT)
+            health["orphans"]["fs_unembedded"].append(str(rel))
+        for f in sorted(list(chroma_only))[:50]:
+            health["orphans"]["chroma_only"].append(f)
 
         # Find stale files
         stale = find_stale_files(codex_dir)
@@ -471,19 +569,338 @@ def run_health_checks() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Distillation
+# 2. Distillation — LLM-enhanced, prose-first, with embed + graph extraction
 # ---------------------------------------------------------------------------
 
 
-def distill_sessions(codex_name: str, codex_root: Path) -> Dict[str, int]:
-    """Extract distilled knowledge from session logs.
+def _llm_distill(session_content: str, codex_name: str, session_id: str) -> Optional[str]:
+    """Produce an LLM-optimized prose summary of a session via opencode-go."""
+    if not LLM_API_KEY:
+        logger.warning("  → No OPENCODE_GO_API_KEY — skipping LLM distill")
+        return None
 
-    For each session file in codex/sessions/, extracts:
-    - Distinct topics mentioned (from markdown headers, bold terms, bullet points)
-    - Code blocks
-    - Decisions and conclusions (lines after "Decision:", "Conclusion:", etc.)
+    # Truncate very long sessions
+    if len(session_content) > 15000:
+        session_content = session_content[:7500] + "\n... [truncated] ...\n" + session_content[-7500:]
 
-    Writes a distilled summary to codex/distilled/.
+    prompt = (
+        "You are Hades, god of the underworld and archivist of the Athenaeum. "
+        "Your job is to read a conversation session and write a clear, factual "
+        "prose summary optimized for consumption by other LLMs (not humans).\n\n"
+        "Cover these topics if present:\n"
+        "- Core topic and goal of the session\n"
+        "- Key decisions made and their rationale\n"
+        "- Important technical details (configs, commands, code patterns)\n"
+        "- Open questions or unresolved issues\n"
+        "- Terminology, tools, or concepts introduced\n\n"
+        "Write in clean, factual prose. Use ### headers for structure. "
+        "Use ``` for code blocks. No decorative language. No fluff. "
+        "This is an LLM reading it for context retrieval — be precise.\n\n"
+        f"CODEX: {codex_name}\n"
+        f"SESSION ID: {session_id}\n\n"
+        f"--- SESSION CONTENT ---\n{session_content}"
+    )
+
+    try:
+        resp = httpx.post(
+            f"{LLM_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {LLM_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": LLM_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2048,
+                "temperature": 0.3,
+            },
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as exc:
+        logger.warning("  → LLM distill failed for %s/%s: %s", codex_name, session_id, exc)
+        return None
+
+
+def _embed_distilled(codex_name: str, distilled_path: Path, content: str) -> bool:
+    """Embed a distilled file into ChromaDB via Ollama. Returns True on success."""
+    try:
+        from ichor_hybrid import _Embedder
+        import chromadb
+
+        embedder = _Embedder()
+        if not embedder.is_available():
+            logger.warning("  → Embedder not available — skipping ChromaDB write for %s", distilled_path.name)
+            return False
+
+        vector = embedder.embed(content)
+        if vector is None:
+            logger.warning("  → Embedding returned None — skipping ChromaDB write")
+            return False
+
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        collection_name = f"pantheon_codex_{codex_name.lower().replace('codex-', '').replace('-', '_')}"
+        try:
+            collection = client.get_collection(name=collection_name)
+        except Exception:
+            collection = client.create_collection(name=collection_name)
+
+        doc_id = str(distilled_path.relative_to(ATHENAEUM_ROOT))
+        collection.add(
+            embeddings=[vector],
+            documents=[content[:3000]],  # Chroma has a size limit per doc
+            ids=[doc_id],
+            metadatas=[{
+                "codex": codex_name,
+                "source": str(distilled_path),
+                "session": distilled_path.stem.replace("--distilled", ""),
+                "type": "text",
+            }],
+        )
+        return True
+    except Exception as exc:
+        logger.warning("  → Embedding failed for %s: %s", distilled_path.name, exc)
+        return False
+
+
+def _embed_raw_file(codex_name: str, file_path: Path) -> bool:
+    """Embed a raw file into ChromaDB. Used by the catch-up phase.
+
+    Separate from _embed_distilled because the metadata schema differs
+    (raw files don't have session IDs).
+    """
+    try:
+        from ichor_hybrid import _Embedder
+        import chromadb
+
+        embedder = _Embedder()
+        if not embedder.is_available():
+            logger.warning("  → Embedder not available — skipping %s", file_path.name)
+            return False
+
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        if not content.strip():
+            return False
+
+        # Chunk if too long
+        if len(content) > 3000:
+            content = content[:3000]
+
+        vector = embedder.embed(content)
+        if vector is None:
+            # Ollama runner wedges after ~10-15 embeds on CPU (nomic-embed-text F16).
+            # Restart the service and retry once before giving up.
+            logger.warning("  → Embedding returned None — restarting Ollama and retrying...")
+            import subprocess, time
+            try:
+                subprocess.run(["systemctl", "--user", "restart", "ollama"], timeout=30, capture_output=True)
+                time.sleep(5)
+            except Exception:
+                logger.debug("  → Ollama restart attempt failed (non-fatal)")
+            vector = embedder.embed(content)
+            if vector is None:
+                logger.warning("  → Embedding still failed after Ollama restart for %s", file_path.name)
+                return False
+
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        collection_name = f"pantheon_codex_{codex_name.lower().replace('codex-', '').replace('-', '_')}"
+        try:
+            collection = client.get_collection(name=collection_name)
+        except Exception:
+            collection = client.create_collection(name=collection_name)
+
+        doc_id = str(file_path.relative_to(ATHENAEUM_ROOT))
+        collection.add(
+            embeddings=[vector],
+            documents=[content],
+            ids=[doc_id],
+            metadatas=[{
+                "codex": codex_name,
+                "source": str(file_path),
+                "filename": file_path.name,
+                "type": "raw",
+            }],
+        )
+        return True
+    except Exception as exc:
+        logger.debug("  → Raw embed failed for %s: %s", file_path.name, exc)
+        return False
+
+
+def embed_missing_files() -> Dict[str, Any]:
+    """Catch-up phase: embed any files on disk missing from ChromaDB.
+
+    Uses the same logic as spot-fix-embed.py but with auto-discovered
+    codexes and includes distilled/sessions/archive content too.
+    """
+    result: Dict[str, Any] = {
+        "total_on_disk": 0,
+        "total_in_chroma": 0,
+        "embedded": 0,
+        "failed": 0,
+        "by_codex": {},
+    }
+
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+
+        # Build set of already-embedded paths
+        embedded_set: set = set()
+        for col in client.list_collections():
+            if col.count() == 0:
+                continue
+            r = col.get(include=["metadatas"])
+            if r and r.get("metadatas"):
+                for m in r["metadatas"]:
+                    if m and ("source" in m):
+                        embedded_set.add(m["source"])
+
+        result["total_in_chroma"] = len(embedded_set)
+
+        # Walk all codexes
+        for codex_name in KNOWN_CODEXES:
+            codex_dir = ATHENAEUM_ROOT / codex_name
+            if not codex_dir.is_dir():
+                continue
+
+            # Find all embeddable files (INCLUDING distilled/sessions/archive)
+            files = []
+            for ext in EMBEDDABLE_EXTS:
+                files.extend(codex_dir.rglob(f"*{ext}"))
+
+            on_disk = len(files)
+            result["total_on_disk"] += on_disk
+            result["by_codex"][codex_name] = {"on_disk": on_disk, "embedded": 0, "failed": 0}
+
+            for fp in files:
+                if str(fp) in embedded_set:
+                    result["by_codex"][codex_name]["embedded"] += 1
+                    continue
+
+                if _embed_raw_file(codex_name, fp):
+                    result["embedded"] += 1
+                    result["by_codex"][codex_name]["embedded"] += 1
+                else:
+                    result["failed"] += 1
+                    result["by_codex"][codex_name]["failed"] += 1
+
+                # Rate-limit to avoid hammering Ollama
+                time.sleep(0.1)
+
+    except ImportError:
+        logger.warning("  → chromadb not available — skipping embed catch-up")
+        result["error"] = "chromadb not available"
+    except Exception as exc:
+        logger.warning("  → Embed catch-up failed: %s", exc)
+        result["error"] = str(exc)
+
+    return result
+
+
+def _extract_to_graph(codex_name: str, session_id: str, content: str, distilled_rel: str) -> bool:
+    """Extract key entities from distilled content and write to graph DB."""
+    try:
+        from graph_client import GraphClient
+    except ImportError:
+        try:
+            # Try the pantheon plugins path
+            _plugins_path = f"{_REAL_HOME}/pantheon/plugins/pantheon"
+            if _plugins_path not in sys.path:
+                sys.path.insert(0, _plugins_path)
+            from graph_client import GraphClient
+        except ImportError:
+            logger.warning("  → GraphClient not importable — skipping graph write")
+            return False
+
+    try:
+        graph = GraphClient(db_path=str(GRAPH_DB))
+        graph.connect()
+
+        # Register the distilled file as a node
+        graph.upsert_node(
+            node_id=f"file:{distilled_rel}",
+            type_="file",
+            label=f"Distilled: {session_id}",
+            codex=codex_name,
+            metadata={"source": "hades_distillation", "session_id": session_id},
+        )
+
+        # Extract entities via simple regex patterns
+        # Find markdown headers (concepts/topics)
+        for m in re.finditer(r"^###\s+(.+)$", content, re.MULTILINE):
+            label = m.group(1).strip()[:100]
+            topic_id = f"concept:{codex_name}:{label.lower().replace(' ', '-')[:40]}"
+            graph.upsert_node(
+                node_id=topic_id,
+                type_="concept",
+                label=label,
+                codex=codex_name,
+            )
+            graph.add_edge(
+                source_id=f"file:{distilled_rel}",
+                target_id=topic_id,
+                type_="contains",
+            )
+
+        # Find bold terms (key concepts)
+        for m in re.finditer(r"\*\*(.+?)\*\*", content):
+            term = m.group(1).strip()
+            if len(term) < 3 or len(term) > 80:
+                continue
+            term_id = f"concept:{codex_name}:{term.lower().replace(' ', '-')[:40]}"
+            try:
+                graph.upsert_node(
+                    node_id=term_id,
+                    type_="concept",
+                    label=term,
+                    codex=codex_name,
+                )
+                graph.add_edge(
+                    source_id=f"file:{distilled_rel}",
+                    target_id=term_id,
+                    type_="mentioned_in",
+                )
+            except Exception:
+                pass
+
+        # Find code blocks (tools/technologies)
+        for m in re.finditer(r"```(\w+)", content):
+            lang = m.group(1).strip()
+            if len(lang) < 2 or len(lang) > 30:
+                continue
+            try:
+                graph.upsert_node(
+                    node_id=f"tool:{codex_name}:{lang.lower()}",
+                    type_="tool",
+                    label=lang,
+                    codex=codex_name,
+                )
+                graph.add_edge(
+                    source_id=f"file:{distilled_rel}",
+                    target_id=f"tool:{codex_name}:{lang.lower()}",
+                    type_="references",
+                )
+            except Exception:
+                pass
+
+        graph.close()
+        return True
+    except Exception as exc:
+        logger.warning("  → Graph extraction failed for %s/%s: %s", codex_name, session_id, exc)
+        return False
+
+
+def distill_sessions(codex_name: str, codex_root: Path) -> Dict[str, Any]:
+    """Extract distilled knowledge from session logs using LLM enhancement.
+
+    For each session:
+    1. LLM distills it into prose-first summary
+    2. Writes to codex/distilled/
+    3. Embeds into ChromaDB
+    4. Extracts entities to graph DB
     """
     sessions_dir = codex_root / SESSIONS_DIR_NAME
     distilled_dir = codex_root / DISTILLED_DIR_NAME
@@ -491,13 +908,8 @@ def distill_sessions(codex_name: str, codex_root: Path) -> Dict[str, int]:
 
     sessions = sorted(sessions_dir.glob("*.md")) if sessions_dir.is_dir() else []
     files_written = 0
-
-    # Known signal patterns for extraction
-    topic_pattern = re.compile(r"^#{1,3}\s+(.+)", re.MULTILINE)
-    decision_pattern = re.compile(r"^\s*(?:Decision|Conclusion|Result|Outcome|Resolution)\s*[:\-–—]\s*(.+)", re.IGNORECASE | re.MULTILINE)
-    bullet_pattern = re.compile(r"^\s*[-*+]\s+(.+)", re.MULTILINE)
-    bold_pattern = re.compile(r"\*\*(.+?)\*\*")
-    code_block_pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+    files_embedded = 0
+    files_graphed = 0
 
     for session_path in sessions:
         try:
@@ -505,104 +917,123 @@ def distill_sessions(codex_name: str, codex_root: Path) -> Dict[str, int]:
         except Exception:
             continue
 
-        if len(content.strip()) < 200:
-            continue  # Skip empty or near-empty sessions
-
-        # Extract metadata from frontmatter
-        metadata = {}
-        fm_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-        if fm_match:
-            for line in fm_match.group(1).strip().split("\n"):
-                if ":" in line:
-                    k, _, v = line.partition(":")
-                    metadata[k.strip()] = v.strip()
-            content = content[fm_match.end():]
-
-        # Extract topics (headers)
-        topics = []
-        for m in topic_pattern.finditer(content):
-            t = m.group(1).strip()
-            if t and t not in topics:
-                topics.append(t)
-
-        # Extract decisions
-        decisions = [m.group(1).strip() for m in decision_pattern.finditer(content) if m.group(1).strip()]
-
-        # Extract bold/key terms
-        key_terms = list(set(m.group(1) for m in bold_pattern.finditer(content) if m.group(1)))
-
-        # Extract code blocks
-        code_blocks = []
-        for m in code_block_pattern.finditer(content):
-            lang = m.group(1) or "text"
-            snippet = m.group(2).strip()
-            if snippet:
-                code_blocks.append({"language": lang, "content": snippet[:500]})
-
-        # Extract bullet points (first ~20)
-        bullets = [m.group(1).strip() for m in bullet_pattern.finditer(content) if m.group(1).strip()][:25]
-
-        if not topics and not decisions and not bullets:
-            continue  # Nothing substantive to distill
-
-        # Build distilled document
         session_id = session_path.stem
-        lines = [
-            f"# Distilled: {session_id}",
-            "",
-            f"Source: `{codex_name}/{SESSIONS_DIR_NAME}/{session_path.name}`",
-            f"Distilled at: {datetime.now(timezone.utc).isoformat()}",
-            "",
-        ]
-
-        if metadata:
-            lines.append("## Metadata")
-            for k, v in metadata.items():
-                lines.append(f"- **{k}**: {v}")
-            lines.append("")
-
-        if topics:
-            lines.append(f"## Topics ({len(topics)})")
-            for t in topics[:15]:
-                lines.append(f"- {t}")
-            lines.append("")
-
-        if decisions:
-            lines.append(f"## Decisions / Conclusions ({len(decisions)})")
-            for d in decisions:
-                lines.append(f"- {d}")
-            lines.append("")
-
-        if key_terms:
-            lines.append(f"## Key Terms ({len(key_terms)})")
-            for t in sorted(key_terms)[:20]:
-                lines.append(f"- {t}")
-            lines.append("")
-
-        if code_blocks:
-            lines.append("## Code / Data")
-            for cb in code_blocks[:5]:
-                lines.append(f"```{cb['language']}")
-                lines.append(cb['content'])
-                lines.append("```")
-                lines.append("")
-
-        if bullets:
-            lines.append(f"## Notes ({len(bullets)})")
-            for b in bullets[:20]:
-                lines.append(f"- {b}")
-            lines.append("")
-
-        # Write distilled file
         distilled_name = f"{session_id}--distilled.md"
         distilled_path = distilled_dir / distilled_name
-        distilled_path.write_text("\n".join(lines), encoding="utf-8")
+
+        # Skip if already distilled (check for existing file)
+        if distilled_path.exists():
+            logger.debug("  → Already distilled: %s", distilled_name)
+            continue
+
+        stripped = content.strip()
+        if len(stripped) < 50:
+            logger.debug("  → Skipping tiny session: %s (%d chars)", session_id, len(stripped))
+            continue
+
+        # Phase 1: LLM distill
+        logger.info("  → Distilling: %s/%s", codex_name, session_id)
+        llm_output = _llm_distill(content, codex_name, session_id)
+
+        if llm_output:
+            # LLM succeeded — write prose summary
+            distilled_text = (
+                f"# Distilled: {session_id}\n\n"
+                f"**Codex:** {codex_name}\n"
+                f"**Source:** `{codex_name}/{SESSIONS_DIR_NAME}/{session_path.name}`\n"
+                f"**Distilled at:** {datetime.now(timezone.utc).isoformat()}\n"
+                f"**Method:** LLM (opencode-go)\n\n"
+                "---\n\n"
+                f"{llm_output}\n"
+            )
+        else:
+            # LLM failed — fall back to regex extraction (always produces something)
+            logger.info("  → LLM distill unavailable, using regex fallback for %s", session_id)
+            fallback = _regex_fallback(content)
+            distilled_text = (
+                f"# Distilled: {session_id}\n\n"
+                f"**Codex:** {codex_name}\n"
+                f"**Source:** `{codex_name}/{SESSIONS_DIR_NAME}/{session_path.name}`\n"
+                f"**Distilled at:** {datetime.now(timezone.utc).isoformat()}\n"
+                f"**Method:** regex-fallback\n\n"
+                "---\n\n"
+                f"{fallback}\n"
+            )
+
+        # Write the distilled file
+        distilled_path.write_text(distilled_text, encoding="utf-8")
         files_written += 1
+        logger.info("  → Wrote: %s", distilled_name)
+
+        # Phase 2: Embed into ChromaDB
+        if _embed_distilled(codex_name, distilled_path, distilled_text):
+            files_embedded += 1
+            logger.debug("  → Embedded: %s", distilled_name)
+
+        # Phase 3: Extract to graph
+        rel_path = str(distilled_path.relative_to(ATHENAEUM_ROOT))
+        if _extract_to_graph(codex_name, session_id, distilled_text, rel_path):
+            files_graphed += 1
+            logger.debug("  → Graphed: %s", distilled_name)
 
     return {
         "sessions_processed": len(sessions),
         "distilled_files_written": files_written,
+        "files_embedded": files_embedded,
+        "files_graphed": files_graphed,
     }
+
+
+def _regex_fallback(content: str) -> str:
+    """Pattern-extraction fallback when LLM is unavailable. Always returns something."""
+    topic_pattern = re.compile(r"^#{1,3}\s+(.+)$", re.MULTILINE)
+    decision_pattern = re.compile(
+        r"^\s*(?:Decision|Conclusion|Result|Outcome|Resolution)\s*[: –—-]\s*(.+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    bold_pattern = re.compile(r"\*\*(.+?)\*\*")
+    code_block_pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+    inline_code = re.compile(r"`([^`]+)`")
+
+    # Strip frontmatter
+    fm_match = re.match(r"^---\n.*?\n---", content, re.DOTALL)
+    if fm_match:
+        content = content[fm_match.end():]
+
+    sections = []
+
+    topics = list(dict.fromkeys(topic_pattern.findall(content)))
+    if topics:
+        sections.append("### Topics\n" + "\n".join(f"- {t.strip()}" for t in topics[:15]))
+
+    decisions = [d.strip() for d in decision_pattern.findall(content) if d.strip()]
+    if decisions:
+        sections.append("### Decisions\n" + "\n".join(f"- {d}" for d in decisions))
+
+    bolds = list(set(m.group(1) for m in bold_pattern.finditer(content) if m.group(1)))
+    if bolds:
+        sections.append("### Key Terms\n" + "\n".join(f"- {t}" for t in sorted(bolds)[:20]))
+
+    codes = []
+    for m in code_block_pattern.finditer(content):
+        lang = m.group(1) or "text"
+        snippet = m.group(2).strip()[:300]
+        if snippet:
+            codes.append(f"```{lang}\n{snippet}\n```")
+    if codes:
+        sections.append("### Code / Data\n" + "\n\n".join(codes[:5]))
+
+    inlines = list(dict.fromkeys(inline_code.findall(content)))
+    if inlines:
+        sections.append("### Inline References\n" + "\n".join(f"- `{t}`" for t in sorted(inlines)[:15]))
+
+    # Always include a raw excerpt as last resort
+    body_lines = [l for l in content.split("\n") if l.strip() and not l.startswith("#")][:30]
+    if body_lines:
+        excerpt = "\n".join(body_lines)
+        sections.append("### Raw Excerpt\n" + excerpt[:2000])
+
+    return "\n\n".join(sections) if sections else "(no structured content extracted)"
 
 
 def run_distillation() -> Dict[str, Any]:
@@ -610,6 +1041,8 @@ def run_distillation() -> Dict[str, Any]:
     results: Dict[str, Any] = {
         "sessions_processed": 0,
         "distilled_files_written": 0,
+        "files_embedded": 0,
+        "files_graphed": 0,
         "by_codex": {},
     }
 
@@ -621,42 +1054,56 @@ def run_distillation() -> Dict[str, Any]:
         codex_result = distill_sessions(codex_name, codex_dir)
         results["sessions_processed"] += codex_result.get("sessions_processed", 0)
         results["distilled_files_written"] += codex_result.get("distilled_files_written", 0)
+        results["files_embedded"] += codex_result.get("files_embedded", 0)
+        results["files_graphed"] += codex_result.get("files_graphed", 0)
         results["by_codex"][codex_name] = codex_result
 
     return results
 
 
 # ---------------------------------------------------------------------------
-# 3. Archive management
+# 3. Underworld — Archive + Deletion Pipeline
+# Elysium: linked stale files → archive/
+# Asphodel Meadows: orphaned stale files → archive/asphodel/ (90-day purgatory)
+# Tartarus: asphodel files past 90 days → deletion queue (15-day window)
 # ---------------------------------------------------------------------------
 
 
 def run_archive() -> Dict[str, Any]:
-    """Archive stale files that are not linked in the entity graph.
+    """Archive stale files sorted into Elysium or Asphodel.
 
-    A file is a candidate if:
-    - Not modified in STALE_THRESHOLD_DAYS
-    - Not registered as a node in the graph (or has no edges)
-    - Not already in archive/ or distilled/
+    **Elysium:** Stale files (90+ days without modification) that still have
+    active graph links are moved to codex/archive/YYYY-MM-DD--filename.
+    They're preserved permanently for reference.
 
-    Currently: reports candidates only, does NOT auto-archive.
-    (Auto-archival requires explicit opt-in to avoid data loss.)
+    **Asphodel Meadows:** Stale files with NO graph links (true orphans) are
+    moved to codex/archive/asphodel/YYYY-MM-DD--filename. They enter a 90-day
+    purgatory — if nothing references them, they advance to Tartarus.
+
+    **Tartarus Deletion Queue:** Handled by run_tartarus_sweep() —
+    asphodel files that survive 90 days without redemption are marked.
     """
     result: Dict[str, Any] = {
         "files_archived": 0,
-        "candidates": [],
+        "asphodel_count": 0,
+        "tartarus_candidates": 0,
         "errors": [],
     }
 
     cutoff = datetime.now(timezone.utc).timestamp() - (STALE_THRESHOLD_DAYS * 86400)
-
-    # Check if graph is available to consult
     graph_available = GRAPH_DB.exists()
+    logger.info("  → Archive threshold: %d days (since %s)",
+                 STALE_THRESHOLD_DAYS,
+                 datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()[:10])
 
     for codex_name in KNOWN_CODEXES:
         codex_dir = ATHENAEUM_ROOT / codex_name
         if not codex_dir.is_dir() or codex_name in SYSTEM_CODEXES:
             continue
+
+        archive_dir = codex_dir / ARCHIVE_DIR_NAME
+        asphodel_dir = archive_dir / "asphodel"
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         for f in codex_dir.rglob("*"):
             if not f.is_file() or f.suffix.lower() not in EMBEDDABLE_EXTS:
@@ -673,13 +1120,14 @@ def run_archive() -> Dict[str, Any]:
             except Exception:
                 continue
 
-            is_stale = mtime < cutoff
+            if mtime >= cutoff:
+                continue  # Not stale yet
 
-            # If graph is available, check if the file is linked
+            # File is stale — determine its fate
             is_linked = False
             if graph_available:
                 try:
-                    import sqlite3
+                    _import_gclient()
                     conn = sqlite3.connect(str(GRAPH_DB))
                     c = conn.execute(
                         "SELECT id FROM nodes WHERE id = ?",
@@ -691,18 +1139,123 @@ def run_archive() -> Dict[str, Any]:
                 except Exception:
                     pass
 
-            if is_stale and not is_linked:
-                result["candidates"].append({
-                    "path": str(rel),
-                    "codex": codex_name,
-                    "last_modified": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
-                    "size": f.stat().st_size,
-                })
+            # Build archive filename with date prefix
+            archive_name = f"{now_str}--{f.name}"
 
-    # Sort by last_modified (oldest first)
-    result["candidates"].sort(key=lambda x: x["last_modified"])
+            if is_linked:
+                # Elysium — linked content, preserve permanently
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                dest = archive_dir / archive_name
+                try:
+                    shutil.move(str(f), str(dest))
+                    result["files_archived"] += 1
+                    logger.info("  → Elysium: %s → archive/%s", rel, archive_name)
+                except Exception as exc:
+                    result["errors"].append(f"Failed to archive {rel}: {exc}")
+            else:
+                # Asphodel — orphaned, 90-day purgatory
+                asphodel_dir.mkdir(parents=True, exist_ok=True)
+                dest = asphodel_dir / archive_name
+                try:
+                    shutil.move(str(f), str(dest))
+                    result["asphodel_count"] += 1
+                    logger.info("  → Asphodel: %s → archive/asphodel/%s", rel, archive_name)
+                except Exception as exc:
+                    result["errors"].append(f"Failed to move {rel} to asphodel: {exc}")
 
     return result
+
+
+def run_tartarus_sweep() -> Dict[str, Any]:
+    """Scan Asphodel for files that have completed their 90-day purgatory.
+
+    Files in archive/asphodel/ that were placed there 90+ days ago are
+    marked as Tartarus candidates — they enter a 15-day deletion queue.
+
+    Does NOT auto-delete. Reports candidates to the Hades report.
+    The Fates cron job reads these marks and performs actual cleanup.
+    """
+    result: Dict[str, Any] = {
+        "candidates": [],
+        "files_cleared": 0,
+        "errors": [],
+    }
+
+    now = datetime.now(timezone.utc)
+    asphodel_cutoff = now.timestamp() - (STALE_THRESHOLD_DAYS * 86400)  # 90 days
+    tartarus_mark = ".tartarus"
+
+    for codex_name in KNOWN_CODEXES:
+        codex_dir = ATHENAEUM_ROOT / codex_name
+        if not codex_dir.is_dir():
+            continue
+
+        asphodel_dir = codex_dir / ARCHIVE_DIR_NAME / "asphodel"
+        if not asphodel_dir.is_dir():
+            continue
+
+        for f in sorted(asphodel_dir.iterdir()):
+            if not f.is_file() or f.suffix.lower() not in EMBEDDABLE_EXTS:
+                continue
+
+            try:
+                mtime = f.stat().st_mtime
+            except Exception:
+                continue
+
+            # Check if already marked for Tartarus
+            is_marked = f.name.endswith(tartarus_mark)
+
+            if is_marked:
+                # Already in deletion queue — check if 15-day window is up
+                # The marker includes the date it was marked
+                marked_since = mtime  # When it was moved to asphodel or marked
+                days_in_tartarus = (now.timestamp() - marked_since) / 86400
+                if days_in_tartarus >= 15:
+                    # Ready for the Fates
+                    try:
+                        f.unlink()
+                        result["files_cleared"] += 1
+                        logger.info("  → Tartarus cleanup: %s/%s (deleted)", codex_name, f.name)
+                    except Exception as exc:
+                        result["errors"].append(f"Failed to delete {f.name}: {exc}")
+                else:
+                    # Still in the 15-day window
+                    rel_path = f"{codex_name}/archive/asphodel/{f.name}"
+                    result["candidates"].append({
+                        "path": rel_path,
+                        "days_remaining": round(15 - days_in_tartarus, 1),
+                    })
+                continue
+
+            # Not yet marked — check if it's been in asphodel long enough
+            # The file was moved to asphodel at its original mtime cutoff,
+            # but the date-stamp in the filename tells us when it was archived
+            days_in_asphodel = (now.timestamp() - mtime) / 86400
+
+            if days_in_asphodel >= STALE_THRESHOLD_DAYS:
+                # 90-day purgatory served — mark for Tartarus
+                marked_path = f.parent / (f.name + tartarus_mark)
+                try:
+                    f.rename(marked_path)
+                    logger.info("  → Tartarus mark: %s/%s (15-day window starts)", codex_name, f.name)
+                except Exception as exc:
+                    result["errors"].append(f"Failed to mark {f.name}: {exc}")
+
+    return result
+
+
+def _import_gclient():
+    """Ensure graph_client module is importable. Called before graph DB access."""
+    try:
+        from graph_client import GraphClient  # noqa: F401
+    except ImportError:
+        _gp = f"{_REAL_HOME}/pantheon/pantheon-core/gods"
+        if _gp not in sys.path:
+            sys.path.insert(0, _gp)
+        _gpp = f"{_REAL_HOME}/pantheon/plugins/pantheon"
+        if _gpp not in sys.path:
+            sys.path.insert(0, _gpp)
 
 
 # ---------------------------------------------------------------------------
@@ -840,8 +1393,16 @@ def deliver_to_mailbox(report: HadesReport) -> Optional[str]:
             summary_parts.append(f"⚠️ {len(orphans_fs)} files not embedded in ChromaDB")
         if dist.get("distilled_files_written", 0) > 0:
             summary_parts.append(f"🔄 Distilled {dist['distilled_files_written']} files")
-        if arch.get("candidates"):
-            summary_parts.append(f"🗄️ {len(arch['candidates'])} archive candidates found")
+        if arch.get("files_archived", 0) > 0:
+            summary_parts.append(f"🏛️ Elysium: {arch['files_archived']} files archived")
+        if arch.get("asphodel_count", 0) > 0:
+            summary_parts.append(f"🌾 Asphodel: {arch['asphodel_count']} orphans staged")
+        tartarus = arch.get("tartarus_candidates", 0)
+        if tartarus > 0:
+            summary_parts.append(f"💀 Tartarus: {tartarus} in deletion queue")
+        fates = report.deletion.get("files_cleared", 0) if report.deletion else 0
+        if fates > 0:
+            summary_parts.append(f"⚰️ Fates claimed: {fates} files")
         sc = report.shared_context or {}
         if sc.get("decisions_ingested", 0) > 0 or sc.get("active_archived", 0) > 0:
             parts = []
@@ -876,7 +1437,12 @@ def deliver_to_mailbox(report: HadesReport) -> Optional[str]:
                 "indexes_created": len(health.get("indexes_created", [])),
                 "files_unembedded": len(orphans_fs),
                 "distilled_written": dist.get("distilled_files_written", 0),
-                "archive_candidates": len(arch.get("candidates", [])),
+                "embedded": dist.get("files_embedded", 0),
+                "graphed": dist.get("files_graphed", 0),
+                "elysium_archived": arch.get("files_archived", 0),
+                "asphodel_staged": arch.get("asphodel_count", 0),
+                "tartarus_marked": arch.get("tartarus_candidates", 0),
+                "fates_cleared": report.deletion.get("files_cleared", 0) if report.deletion else 0,
                 "entities_extracted": extr.get("entities_extracted", 0),
                 "relations_extracted": extr.get("relations_extracted", 0),
                 "shared_decisions_ingested": sc.get("decisions_ingested", 0),
@@ -920,6 +1486,27 @@ def run_hades() -> HadesReport:
             report.errors.append(f"Health checks failed: {exc}")
             logger.exception("Hades health check error")
 
+        # Phase 1b: Catch-up embed — embed any files missing from ChromaDB
+        logger.info("Hades: Embedding catch-up...")
+        try:
+            embed_result = embed_missing_files()
+            if embed_result.get("embedded", 0) > 0 or embed_result.get("failed", 0) > 0:
+                logger.info("  → %d embedded, %d failed (disk: %d, chroma: %d)",
+                             embed_result["embedded"], embed_result["failed"],
+                             embed_result.get("total_on_disk", 0),
+                             embed_result.get("total_in_chroma", 0))
+                # Update health check stats with new embed counts
+                for codex, stats in embed_result.get("by_codex", {}).items():
+                    if codex in report.health.get("codexes", {}):
+                        report.health["codexes"][codex]["embedded"] = stats.get("embedded", 0)
+            elif embed_result.get("error"):
+                logger.warning("  → Embed catch-up error: %s", embed_result["error"])
+            else:
+                logger.info("  → No missing files to embed")
+        except Exception as exc:
+            report.errors.append(f"Embed catch-up failed: {exc}")
+            logger.exception("Hades embed catch-up error")
+
         # Phase 2: Distillation
         logger.info("Hades: Running distillation...")
         try:
@@ -932,15 +1519,35 @@ def run_hades() -> HadesReport:
             report.errors.append(f"Distillation failed: {exc}")
             logger.exception("Hades distillation error")
 
-        # Phase 3: Archive scan
-        logger.info("Hades: Scanning for archive candidates...")
+        # Phase 3: Underworld — Archive stale files (Elysium + Asphodel)
+        logger.info("Hades: Running underworld archive...")
         try:
             arch = run_archive()
             report.archive = arch
-            logger.info("  → %d archive candidates found", len(arch.get("candidates", [])))
+            logger.info("  → Elysium: %d files archived, Asphodel: %d orphans staged",
+                         arch.get("files_archived", 0),
+                         arch.get("asphodel_count", 0))
+            if arch.get("errors"):
+                logger.warning("  → %d archive errors", len(arch["errors"]))
         except Exception as exc:
-            report.errors.append(f"Archive scan failed: {exc}")
+            report.errors.append(f"Underworld archive failed: {exc}")
             logger.exception("Hades archive error")
+
+        # Phase 3b: Tartarus sweep — mark/clear asphodel files past 90 days
+        logger.info("Hades: Sweeping Tartarus deletion queue...")
+        try:
+            deletion = run_tartarus_sweep()
+            report.deletion = deletion
+            if deletion.get("files_cleared", 0) > 0:
+                logger.info("  → Fates claimed %d files", deletion["files_cleared"])
+            if deletion.get("candidates"):
+                logger.info("  → %d files in 15-day Tartarus window", len(deletion["candidates"]))
+            report.archive["tartarus_candidates"] = len(deletion.get("candidates", []))
+            if deletion.get("errors"):
+                logger.warning("  → %d Tartarus errors", len(deletion["errors"]))
+        except Exception as exc:
+            report.errors.append(f"Tartarus sweep failed: {exc}")
+            logger.exception("Hades Tartarus error")
 
         # Phase 4: Shared Context Sweep — ingest >24h entries from ~/pantheon/shared/
         logger.info("Hades: Running shared context sweep...")
@@ -990,8 +1597,7 @@ def run_hades() -> HadesReport:
         elapsed = time.time() - start
         logger.info("Hades complete in %.2fs", elapsed)
 
-        # Phase 6: Write heartbeat for the Fates
-        import sys
+        # Phase 8: Write heartbeat for the Fates
         _hades_scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts")
         if _hades_scripts not in sys.path:
             sys.path.insert(0, _hades_scripts)
@@ -1016,12 +1622,22 @@ def run_hades() -> HadesReport:
 
 def main():
     """Run Hades and print the report to stdout."""
+    # Load .env for API keys (OPENCODE_GO_API_KEY, etc.)
+    _env_file = f"{_REAL_HOME}/.hermes/.env"
+    if os.path.isfile(_env_file):
+        with open(_env_file) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip())
     import argparse
 
     parser = argparse.ArgumentParser(description="Hades — Athenaeum consolidation pipeline")
     parser.add_argument("--health", action="store_true", help="Run health checks only")
     parser.add_argument("--distill", action="store_true", help="Run distillation only")
-    parser.add_argument("--archive", action="store_true", help="Scan archive candidates only")
+    parser.add_argument("--archive", action="store_true", help="Archive stale files (Elysium + Asphodel)")
+    parser.add_argument("--tartarus", action="store_true", help="Run Tartarus deletion sweep only")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--save", metavar="PATH", help="Save report to file")
 
@@ -1040,6 +1656,11 @@ def main():
     elif args.archive:
         report = HadesReport()
         report.archive = run_archive()
+    elif args.tartarus:
+        report = HadesReport()
+        deletion = run_tartarus_sweep()
+        report.deletion = deletion
+        report.archive["tartarus_candidates"] = len(deletion.get("candidates", []))
     else:
         report = run_hades()
 

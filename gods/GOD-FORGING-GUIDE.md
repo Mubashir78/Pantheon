@@ -451,9 +451,10 @@ Then create the script at `athenaeum/skills/<name>/scripts/<script>.py`.
 
 ### Currently Available Skills
 
-| Skill | Description | MCP Command |
-|-------|-------------|-------------|
-| capture-idea | Add an idea to Codex-Pantheon/projects.md | `mcp_pantheon_skill_run({"name": "capture-idea", "arguments": "[\"Title\", \"Desc\"]"})` |
+| Skill | Description | How to Use |
+|-------|-------------|-----------|
+| project-ideas | Manage `~/pantheon/project-ideas.md` — the canonical project ideas list. Add, list, update, organize, and remove ideas. | Load with `skill_view(name='project-ideas')` — edits the file directly or call `/api/ideas*` endpoints |
+| vision-specialist | Deep vision analysis using Gemma 4 | `mcp_pantheon_skill_run({"name": "vision-specialist", ...})` |
 
 ---
 

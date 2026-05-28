@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico',
     '/api/auth/login', '/api/auth/status',
+    '/api/olympus/auth/login', '/api/olympus/auth/register',
+    '/api/olympus/health',
     '/manifest.json', '/manifest.webmanifest',
 })
 

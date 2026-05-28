@@ -24,11 +24,11 @@ ATHENAEUM_ROOT = Path(f"{_REAL_HOME}/athenaeum")
 CHROMA_DIR = Path(f"{_REAL_HOME}/.hermes/pantheon/chroma")
 EMBED_MODEL = os.environ.get(
     "ATHENAEUM_EMBED_MODEL",
-    "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+    "nomic-embed-text",
 )
 EMBED_API_URL = os.environ.get(
     "ATHENAEUM_EMBED_URL",
-    "https://openrouter.ai/api/v1/embeddings",
+    "http://localhost:11434/api/embeddings",
 )
 OPENROUTER_API_KEY = os.environ.get("ATHENAEUM_EMBED_API_KEY", "") or os.environ.get("OPENROUTER_API_KEY", "")
 EMBEDDABLE_EXTS = {".md", ".txt", ".json", ".yaml", ".yml"}
@@ -72,28 +72,33 @@ def main():
     import requests
 
     # ── Test embedder connection ─────────────────────────────────────────
-    if not OPENROUTER_API_KEY:
-        logger.error("OPENROUTER_API_KEY is not set")
-        sys.exit(1)
+    provider = os.environ.get("ATHENAEUM_EMBED_PROVIDER", "ollama").lower()
 
-    logger.info("Testing OpenRouter embedding with %s...", EMBED_MODEL)
-    try:
-        test_resp = requests.post(
-            EMBED_API_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={"model": EMBED_MODEL, "input": "test"},
-            timeout=30,
-        )
-        test_resp.raise_for_status()
-        test_data = test_resp.json()
-        test_dim = len(test_data["data"][0]["embedding"])
-        logger.info("  ✓ OpenRouter available, embedding dimension: %d", test_dim)
-    except Exception as exc:
-        logger.error("OpenRouter embedding failed: %s", exc)
-        sys.exit(1)
+    if provider == "ollama":
+        logger.info("Using Ollama embeddings with %s...", EMBED_MODEL)
+    else:
+        if not OPENROUTER_API_KEY:
+            logger.error("OPENROUTER_API_KEY is not set")
+            sys.exit(1)
+
+        logger.info("Testing OpenRouter embedding with %s...", EMBED_MODEL)
+        try:
+            test_resp = requests.post(
+                EMBED_API_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": EMBED_MODEL, "input": "test"},
+                timeout=30,
+            )
+            test_resp.raise_for_status()
+            test_data = test_resp.json()
+            test_dim = len(test_data["data"][0]["embedding"])
+            logger.info("  ✓ OpenRouter available, embedding dimension: %d", test_dim)
+        except Exception as exc:
+            logger.error("OpenRouter embedding failed: %s", exc)
+            sys.exit(1)
 
     # ── Wipe existing collections ────────────────────────────────────────
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
@@ -127,7 +132,7 @@ def main():
         chunk_size = 2000  # characters, ~500 tokens
         text_str = text[:64000]  # Truncate to 64K chars max
 
-        provider = os.environ.get("ATHENAEUM_EMBED_PROVIDER", "").lower()
+        provider = os.environ.get("ATHENAEUM_EMBED_PROVIDER", "ollama").lower()
 
         def _call_api(payload: dict) -> List[float]:
             nonlocal provider
@@ -165,6 +170,10 @@ def main():
     # ── Embed all files ──────────────────────────────────────────────────
     success = 0
     fail = 0
+    batch_size = 50
+    # Batch buffer: list of (ids, embeddings, documents, metadatas, col_name) tuples
+    batch: list[tuple] = []
+
     for idx, (rel, full, codex) in enumerate(all_files, 1):
         try:
             path = Path(full)
@@ -174,19 +183,31 @@ def main():
                 continue
 
             embedding = openrouter_embed(content)
-            doc_id = str(path.resolve())
-            col = client.get_collection(_partition_for(codex))
-            col.upsert(
-                ids=[doc_id],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[{
-                    "source": str(path),
-                    "codex": codex,
-                    "filename": path.name,
-                }],
-            )
+            batch.append((
+                str(path.resolve()),
+                embedding,
+                content,
+                {"source": str(path), "codex": codex, "filename": path.name},
+                _partition_for(codex),
+            ))
             success += 1
+
+            # Flush batch
+            if len(batch) >= batch_size or idx == len(all_files):
+                by_col: dict[str, dict] = {}
+                for doc_id, emb, doc, meta, cname in batch:
+                    by_col.setdefault(cname, {"ids": [], "embeddings": [], "documents": [], "metadatas": []})
+                    by_col[cname]["ids"].append(doc_id)
+                    by_col[cname]["embeddings"].append(emb)
+                    by_col[cname]["documents"].append(doc)
+                    by_col[cname]["metadatas"].append(meta)
+
+                for cname, data in by_col.items():
+                    collection = client.get_collection(cname)
+                    collection.upsert(**data)
+
+                batch.clear()
+
         except Exception as exc:
             logger.warning("Failed: %s — %s", rel, exc)
             fail += 1

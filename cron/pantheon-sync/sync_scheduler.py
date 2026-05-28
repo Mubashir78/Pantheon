@@ -37,6 +37,20 @@ from sync_state import SyncState
 from adapters import get_adapter, list_adapters  # noqa: E402
 
 # ---------------------------------------------------------------------------
+# Import Codex-Stream ingest pipeline (T13/P1d)
+# ---------------------------------------------------------------------------
+
+_CODEX_STREAM = Path("~/athenaeum/Codex-Stream/ingest").expanduser()
+if _CODEX_STREAM.exists():
+    sys.path.insert(0, str(_CODEX_STREAM))
+    try:
+        from pipeline import ingest_into_codex_stream  # noqa: E402
+    except ImportError:
+        ingest_into_codex_stream = None  # type: ignore[assignment]
+else:
+    ingest_into_codex_stream = None
+
+# ---------------------------------------------------------------------------
 # Paths — everything lives under ~/.hermes/cron/pantheon-sync/
 # ---------------------------------------------------------------------------
 
@@ -246,6 +260,28 @@ def run_sync_tick() -> int:
                 synced,
                 result.get("status", "ok"),
             )
+
+            # ── Feed records into Codex-Stream ingest pipeline (T13/P1d) ──
+            if ingest_into_codex_stream and result.get("records"):
+                for record in result["records"]:
+                    canonical = {
+                        "content": getattr(record, "content", ""),
+                        "metadata": getattr(record, "metadata", {}),
+                        "provider": getattr(record, "provider", conn.get("provider", "")),
+                    }
+                    try:
+                        ingest_result = ingest_into_codex_stream(canonical, conn)
+                        log.debug(
+                            "INGEST %s: written=%d dropped=%d skipped=%d entities=%d",
+                            conn_id,
+                            ingest_result.chunks_written,
+                            ingest_result.chunks_dropped,
+                            ingest_result.chunks_skipped,
+                            ingest_result.entities_found,
+                        )
+                    except Exception:
+                        log.exception("INGEST failed for record in %s", conn_id)
+
             n_synced += 1
 
         except Exception:

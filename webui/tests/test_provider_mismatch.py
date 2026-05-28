@@ -794,6 +794,57 @@ def test_named_custom_provider_hint_with_colon_is_preserved(monkeypatch):
     assert effective == "@custom:sub2api:gpt-5.4-mini"
 
 
+def test_provider_qualified_model_with_colon_preserves_provider_hint(monkeypatch):
+    """Provider-qualified model IDs may contain ':' inside the model name."""
+    import api.config as config
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "deepseek",
+            "default_model": "deepseek-v4-flash",
+            "groups": [
+                {
+                    "provider": "Ollama Cloud",
+                    "provider_id": "ollama-cloud",
+                    "models": [
+                        {
+                            "id": "@ollama-cloud:ministral-3:14b",
+                            "label": "Ministral 3 14B",
+                        }
+                    ],
+                },
+                {
+                    "provider": "DeepSeek",
+                    "provider_id": "deepseek",
+                    "models": [
+                        {
+                            "id": "deepseek-v4-flash",
+                            "label": "DeepSeek V4 Flash",
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "@ollama-cloud:ministral-3:14b",
+        "ollama-cloud",
+    )
+
+    assert changed is False
+    assert effective == "@ollama-cloud:ministral-3:14b"
+    assert provider == "ollama-cloud"
+    agent_model, agent_provider, _base_url = config.resolve_model_provider(
+        config.model_with_provider_context(effective, provider)
+    )
+    assert agent_model == "ministral-3:14b"
+    assert agent_provider == "ollama-cloud"
+
+
 def test_issue1734_stale_openai_slash_session_model_repairs_to_codex(monkeypatch):
     """Legacy openai/... session IDs must not route to OpenRouter when Codex is active."""
     import api.routes as routes
@@ -889,6 +940,7 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
 
     class FakeHandler:
         def __init__(self):
+            self.headers = {}
             self.wfile = io.BytesIO()
             self.status = None
             self.sent_headers = {}
@@ -925,6 +977,221 @@ def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
     assert captured_thread["args"][2] == "gpt-5.5"
     assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
     assert save_calls[-1]["model_provider"] == "openai-codex"
+
+
+def test_chat_start_blank_or_missing_model_uses_session_canonical_provider(monkeypatch):
+    """Blank/missing body model must keep the canonical session model/provider."""
+    import contextlib
+    import io
+    import json
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "opencode-go",
+            "default_model": "deepseek-v4-flash",
+            "groups": [
+                {
+                    "provider": "OpenCode Go",
+                    "provider_id": "opencode-go",
+                    "models": [
+                        {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash"}
+                    ],
+                },
+            ],
+        },
+    )
+
+    captured_threads = []
+    save_calls = []
+
+    class DummySession:
+        workspace = "/tmp/hermes-webui-test"
+        model = "deepseek-v4-flash"
+        model_provider = "opencode-go"
+        active_stream_id = None
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        messages = []
+        context_messages = []
+
+        def __init__(self, session_id):
+            self.session_id = session_id
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(
+                {
+                    "session_id": self.session_id,
+                    "touch_updated_at": touch_updated_at,
+                    "model": self.model,
+                    "model_provider": self.model_provider,
+                    "pending_user_message": self.pending_user_message,
+                }
+            )
+
+    class FakeThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            captured_threads.append(
+                {"target": target, "args": args, "kwargs": kwargs or {}, "daemon": daemon}
+            )
+
+        def start(self):
+            captured_threads[-1]["started"] = True
+
+    class FakeHandler:
+        def __init__(self):
+            self.headers = {}
+            self.wfile = io.BytesIO()
+            self.status = None
+            self.sent_headers = {}
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    sessions = {}
+    monkeypatch.setattr(routes, "get_session", lambda sid: sessions[sid])
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    bodies = [
+        {"message": "missing model turn"},
+        {"message": "blank model turn", "model": ""},
+    ]
+    for index, body in enumerate(bodies):
+        session = DummySession(f"canonical_session_{index}")
+        sessions[session.session_id] = session
+        handler = FakeHandler()
+        routes._handle_chat_start(
+            handler,
+            {"session_id": session.session_id, **body},
+        )
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        thread = captured_threads[-1]
+
+        assert handler.status == 200
+        assert payload["session_id"] == session.session_id
+        assert payload["effective_model_provider"] == "opencode-go"
+        assert session.model == "deepseek-v4-flash"
+        assert session.model_provider == "opencode-go"
+        assert save_calls[-1]["model"] == "deepseek-v4-flash"
+        assert save_calls[-1]["model_provider"] == "opencode-go"
+        assert thread["args"][2] == "deepseek-v4-flash"
+        assert thread["kwargs"]["model_provider"] == "opencode-go"
+        assert thread["started"] is True
+
+
+def _exercise_session_update_model_switch(monkeypatch, *, old_model, old_provider, new_model, new_provider):
+    import contextlib
+    import io
+    import json
+    import types
+    import api.config as config
+    import api.routes as routes
+
+    class DummySession:
+        session_id = "model_switch_session"
+        workspace = "/tmp/hermes-webui-test"
+        messages = []
+
+        def __init__(self):
+            self.model = old_model
+            self.model_provider = old_provider
+            self.save_calls = 0
+
+        def save(self, *args, **kwargs):
+            self.save_calls += 1
+
+        def compact(self):
+            return {
+                "session_id": self.session_id,
+                "workspace": self.workspace,
+                "model": self.model,
+                "model_provider": self.model_provider,
+            }
+
+    class FakeHandler:
+        def __init__(self, body):
+            raw = json.dumps(body).encode("utf-8")
+            self.headers = {"Content-Length": str(len(raw))}
+            self.rfile = io.BytesIO(raw)
+            self.wfile = io.BytesIO()
+            self.status = None
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            pass
+
+        def end_headers(self):
+            pass
+
+    session = DummySession()
+    evicted = []
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(config, "_evict_session_agent", lambda sid: evicted.append(sid))
+
+    body = {"session_id": session.session_id, "workspace": session.workspace}
+    if new_model is not None:
+        body["model"] = new_model
+    if new_provider is not None:
+        body["model_provider"] = new_provider
+    handler = FakeHandler(body)
+    handled = routes.handle_post(handler, types.SimpleNamespace(path="/api/session/update"))
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    return handled, handler, payload, session, evicted
+
+
+def test_session_update_persists_model_provider_and_evicts_cached_agent(monkeypatch):
+    """/api/session/update must evict the cached agent when model/provider changes."""
+    handled, handler, payload, session, evicted = _exercise_session_update_model_switch(
+        monkeypatch,
+        old_model="openai/gpt-5.4-mini",
+        old_provider="openrouter",
+        new_model="gpt-5.5",
+        new_provider="openai-codex",
+    )
+
+    assert handled is None
+    assert handler.status == 200
+    assert session.model == "gpt-5.5"
+    assert session.model_provider == "openai-codex"
+    assert session.save_calls == 1
+    assert payload["session"]["model"] == "gpt-5.5"
+    assert payload["session"]["model_provider"] == "openai-codex"
+    assert evicted == [session.session_id]
+
+
+def test_session_update_same_model_provider_does_not_evict_cached_agent(monkeypatch):
+    """A no-op model/provider update should not evict the cached agent."""
+    _, handler, _payload, session, evicted = _exercise_session_update_model_switch(
+        monkeypatch,
+        old_model="gpt-5.5",
+        old_provider="openai-codex",
+        new_model="gpt-5.5",
+        new_provider="openai-codex",
+    )
+
+    assert handler.status == 200
+    assert session.model == "gpt-5.5"
+    assert session.model_provider == "openai-codex"
+    assert session.save_calls == 1
+    assert evicted == []
 
 
 def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):

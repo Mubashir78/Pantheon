@@ -34,6 +34,12 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("pantheon_ichor_nudge")
 
+# User observations extraction (same LLM call, extra output block)
+from .user_observations_patch import (
+    USER_OBSERVATIONS_PROMPT_ADDITION,
+    _store_user_observations,
+)
+
 # ---------------------------------------------------------------------------
 # Lazy IchorDB singleton
 # ---------------------------------------------------------------------------
@@ -155,33 +161,40 @@ def _store_ichor_events(content: str, session_id: str = "", god_name: str = "") 
         return 0
 
 
+def _extract_context(review_messages: List[Dict]) -> tuple:
+    """Extract session_id and god_name from review messages."""
+    session_id = ""
+    god_name = ""
+    for m in review_messages or []:
+        if isinstance(m, dict):
+            if not session_id:
+                session_id = m.get("session_id", "")
+            if not god_name:
+                god_name = m.get("god_name", "")
+    return session_id, god_name
+
+
 def _patched_summarize(review_messages: List[Dict], prior_snapshot: List[Dict]) -> List[str]:
-    """Wraps the original _summarize_background_review_actions to also extract Ichor events."""
+    """Wraps the original _summarize_background_review_actions to also extract Ichor events + User Observations."""
     global _original_summarize
 
     actions = _original_summarize(review_messages, prior_snapshot) if _original_summarize else []
 
-    # Scan for Ichor events in the last assistant response
+    # Scan for Ichor events AND user observations in the last assistant response
     for msg in reversed(review_messages or []):
         if not isinstance(msg, dict):
             continue
         if msg.get("role") == "assistant":
             content = msg.get("content", "") or ""
-            if "ICHOR_EVENTS" in content:
-                # Extract session_id and god_name from messages if available
-                session_id = ""
-                god_name = ""
-                for m in review_messages or []:
-                    if isinstance(m, dict):
-                        sid = m.get("session_id", "")
-                        if sid:
-                            session_id = sid
-                        gn = m.get("god_name", "")
-                        if gn:
-                            god_name = gn
+            session_id, god_name = _extract_context(review_messages)
 
+            if "ICHOR_EVENTS" in content:
                 _store_ichor_events(content, session_id=session_id, god_name=god_name)
-                break
+
+            if "USER_OBSERVATIONS" in content:
+                _store_user_observations(content, session_id=session_id, god_name=god_name)
+
+            break
 
     return actions
 
@@ -199,6 +212,15 @@ def _patch_prompts() -> None:
         if "ICHOR_EVENTS" not in AIAgent._COMBINED_REVIEW_PROMPT:
             AIAgent._COMBINED_REVIEW_PROMPT += ICHOR_PROMPT_ADDITION
             logger.info("Patched _COMBINED_REVIEW_PROMPT with Ichor extraction")
+
+        # Also add user observations extraction (same LLM call)
+        if "USER_OBSERVATIONS" not in AIAgent._MEMORY_REVIEW_PROMPT:
+            AIAgent._MEMORY_REVIEW_PROMPT += USER_OBSERVATIONS_PROMPT_ADDITION
+            logger.info("Patched _MEMORY_REVIEW_PROMPT with User Observations")
+
+        if "USER_OBSERVATIONS" not in AIAgent._COMBINED_REVIEW_PROMPT:
+            AIAgent._COMBINED_REVIEW_PROMPT += USER_OBSERVATIONS_PROMPT_ADDITION
+            logger.info("Patched _COMBINED_REVIEW_PROMPT with User Observations")
 
     except Exception:
         logger.warning("Failed to patch memory review prompts (non-fatal)", exc_info=True)

@@ -4,13 +4,15 @@
 Usage:
   hades                    Run full consolidation pipeline
   hades --health           Health checks only
-  hades --distill          Distillation only
-  hades --archive          Archive scan only
+  hades --distill          Distillation only (LLM-enhanced + embed + graph)
+  hades --archive          Archive stale files (Elysium + Asphodel)
+  hades --tartarus         Tartarus deletion sweep only
   hades --json             Output as JSON (pipe to file)
   hades --save <path>      Save report to file
   hades --help             Show this help
 """
 
+import json
 import logging
 import os
 import sys
@@ -21,7 +23,6 @@ _REAL_HOME = os.path.expanduser("~")
 sys.path.insert(0, _REAL_HOME + "/pantheon/pantheon-core/gods")
 
 # Load profile-level .env for API keys
-# Point at main Hermes profile so all API keys (OPENCODE_GO, etc.) are available
 _ENV_FILE = _REAL_HOME + "/.hermes/.env"
 if os.path.isfile(_ENV_FILE):
     with open(_ENV_FILE) as _f:
@@ -31,7 +32,7 @@ if os.path.isfile(_ENV_FILE):
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-from hades import run_hades, HadesReport, run_health_checks, run_distillation, run_archive, load_suggestions
+from hades import run_hades, HadesReport, run_health_checks, run_distillation, run_archive, run_tartarus_sweep, load_suggestions
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
@@ -42,17 +43,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Hades — Athenaeum nightly consolidation pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
+        epilog="""Examples:
   hades                          Full run
   hades --health                 Health checks only
   hades --distill                Distillation only
+  hades --archive                Archive stale files
+  hades --tartarus               Tartarus deletion sweep
   hades --json --save report.json
         """,
     )
     parser.add_argument("--health", action="store_true", help="Run health checks only")
     parser.add_argument("--distill", action="store_true", help="Run distillation only")
-    parser.add_argument("--archive", action="store_true", help="Scan archive candidates only")
+    parser.add_argument("--archive", action="store_true", help="Archive stale files (Elysium + Asphodel)")
+    parser.add_argument("--tartarus", action="store_true", help="Tartarus deletion sweep only")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--save", metavar="PATH", help="Save report to file")
 
@@ -68,20 +71,22 @@ Examples:
     elif args.archive:
         report = HadesReport()
         report.archive = run_archive()
+    elif args.tartarus:
+        report = HadesReport()
+        deletion = run_tartarus_sweep()
+        report.deletion = deletion
     else:
         report = run_hades()
 
     if args.json:
-        output = report.to_dict()
-        import json
-        output_text = json.dumps(output, indent=2, default=str)
+        output = json.dumps(report.to_dict(), indent=2, default=str)
     else:
-        output_text = report.to_markdown()
+        output = report.to_markdown()
 
-    print(output_text)
+    print(output)
 
     if args.save:
-        Path(args.save).write_text(output_text, encoding="utf-8")
+        Path(args.save).write_text(output, encoding="utf-8")
         logging.getLogger("hades").info("Report saved to %s", args.save)
 
 

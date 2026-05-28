@@ -1898,9 +1898,12 @@ from api.streaming import _sse, _run_agent_streaming, cancel_stream
 from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
+    get_hardware_info,
     get_onboarding_status,
     complete_onboarding,
     probe_provider_endpoint,
+    register_core_gods,
+    verify_opencode_key,
 )
 from api.oauth import (
     cancel_onboarding_oauth_flow,
@@ -3331,10 +3334,48 @@ a:hover{{text-decoration:underline}}
             bad(handler, str(exc), status=400)
         return True
 
-    # ── Olympus routes (multi-user auth, users, feature flags) ──
+    # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
-        from api.olympus_routes import handle_olympus_get
-        return handle_olympus_get(handler, parsed)
+        from urllib.request import Request as URLRequest, urlopen
+        from urllib.error import HTTPError, URLError
+        import json as _json
+
+        target_url = f"http://127.0.0.1:8788{parsed.path.replace('/olympus', '', 1)}"
+        if parsed.query:
+            target_url += f"?{parsed.query}"
+
+        try:
+            req = URLRequest(target_url)
+            # Forward auth headers
+            if handler.headers.get("Authorization"):
+                req.add_header("Authorization", handler.headers["Authorization"])
+            if handler.headers.get("Cookie"):
+                req.add_header("Cookie", handler.headers["Cookie"])
+
+            with urlopen(req, timeout=30) as resp:
+                body = resp.read()
+                handler.send_response(resp.status)
+                for key, val in resp.getheaders():
+                    if key.lower() not in ("transfer-encoding", "connection"):
+                        handler.send_header(key, val)
+                handler.send_header("Content-Length", str(len(body)))
+                handler.end_headers()
+                handler.wfile.write(body)
+        except HTTPError as e:
+            body = e.read()
+            handler.send_response(e.code)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+        except URLError:
+            handler.send_response(502)
+            handler.send_header("Content-Type", "application/json")
+            err = _json.dumps({"error": "Olympus backend unreachable"}).encode()
+            handler.send_header("Content-Length", str(len(err)))
+            handler.end_headers()
+            handler.wfile.write(err)
+        return True
 
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
@@ -3377,6 +3418,9 @@ a:hover{{text-decoration:underline}}
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
+
+    if parsed.path == "/api/onboarding/hardware":
+        return j(handler, get_hardware_info())
 
     if parsed.path.startswith("/extensions/"):
         from api.extensions import serve_extension_static
@@ -4680,10 +4724,48 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 500)
 
-    # ── Olympus routes (multi-user auth, users, feature flags) ──
+    # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
-        from api.olympus_routes import handle_olympus_post
-        return handle_olympus_post(handler, parsed, body)
+        from urllib.request import Request as URLRequest, urlopen
+        from urllib.error import HTTPError, URLError
+
+        target_url = f"http://127.0.0.1:8788{parsed.path.replace('/olympus', '', 1)}"
+        if parsed.query:
+            target_url += f"?{parsed.query}"
+
+        try:
+            data = json.dumps(body).encode("utf-8") if body else None
+            req = URLRequest(target_url, data=data, method="POST")
+            req.add_header("Content-Type", "application/json")
+            if handler.headers.get("Authorization"):
+                req.add_header("Authorization", handler.headers["Authorization"])
+            if handler.headers.get("Cookie"):
+                req.add_header("Cookie", handler.headers["Cookie"])
+
+            with urlopen(req, timeout=30) as resp:
+                resp_body = resp.read()
+                handler.send_response(resp.status)
+                for key, val in resp.getheaders():
+                    if key.lower() not in ("transfer-encoding", "connection"):
+                        handler.send_header(key, val)
+                handler.send_header("Content-Length", str(len(resp_body)))
+                handler.end_headers()
+                handler.wfile.write(resp_body)
+        except HTTPError as e:
+            err_body = e.read()
+            handler.send_response(e.code)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(err_body)))
+            handler.end_headers()
+            handler.wfile.write(err_body)
+        except URLError:
+            handler.send_response(502)
+            handler.send_header("Content-Type", "application/json")
+            err = json.dumps({"error": "Olympus backend unreachable"}).encode()
+            handler.send_header("Content-Length", str(len(err)))
+            handler.end_headers()
+            handler.wfile.write(err)
+        return True
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":
@@ -5673,6 +5755,37 @@ def handle_post(handler, parsed) -> bool:
             # Non-fatal — profile exists, soul file is bonus
             pass
 
+        # Write god.json so the god appears in the Pantheon roster
+        try:
+            # Extract metadata from SOUL.md
+            display_name = god_name  # default
+            domain = ""
+            in_domain = False
+            for line in soul_md.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("# ") and display_name == god_name:
+                    display_name = stripped[2:].strip()
+                if stripped.startswith("## Domain"):
+                    in_domain = True
+                    continue
+                if in_domain:
+                    if stripped and not stripped.startswith("#"):
+                        domain = stripped.lstrip("- ").strip()
+                        break
+                    if stripped.startswith("##"):
+                        break
+
+            from api.profiles import _write_god_metadata
+            _write_god_metadata(god_home, {
+                "display_name": display_name,
+                "icon": f"/api/gods/{safe_name}/icon",
+                "color": "#748FFC",  # default, user can customize later
+                "domain": domain or "Specialist",
+            })
+        except Exception:
+            # Non-fatal — god will still work, just needs manual metadata
+            pass
+
         # Bump local download count
         import json as _json
         _dl_path = os.path.join(os.path.dirname(__file__), "..", "data", "download_counts.json")
@@ -6330,6 +6443,38 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, probe_provider_endpoint(provider, base_url, api_key))
         except Exception as e:
             return bad(handler, f"probe failed: {e}", 500)
+
+    if parsed.path == "/api/onboarding/verify-opencode":
+        # Verify an OpenCode Go API key by listing available models (#T15c).
+        # Read-only: no config.yaml writes.  Inherits the same local-network
+        # gate as /api/onboarding/probe since it forwards the api_key to an
+        # external service.
+        from api.auth import is_auth_enabled
+        import os as _os
+        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
+            import ipaddress
+            try:
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _raw = handler.client_address[0]
+                _ip_str = _xff or _xri or _raw
+                addr = ipaddress.ip_address(_ip_str)
+                is_local = addr.is_loopback or addr.is_private
+            except ValueError:
+                is_local = False
+            if not is_local:
+                return bad(handler, "Onboarding verify-opencode is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
+        api_key = str((body or {}).get("api_key") or "").strip() or None
+        try:
+            return j(handler, verify_opencode_key(api_key))
+        except Exception as e:
+            return bad(handler, f"verify-opencode failed: {e}", 500)
+
+    if parsed.path == "/api/onboarding/register-gods":
+        try:
+            return j(handler, register_core_gods())
+        except Exception as e:
+            return bad(handler, str(e), 500)
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":
@@ -7194,10 +7339,48 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
-    # ── Olympus routes ──
+    # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
-        from api.olympus_routes import handle_olympus_patch
-        return handle_olympus_patch(handler, parsed, body)
+        from urllib.request import Request as URLRequest, urlopen
+        from urllib.error import HTTPError, URLError
+
+        target_url = f"http://127.0.0.1:8788{parsed.path.replace('/olympus', '', 1)}"
+        if parsed.query:
+            target_url += f"?{parsed.query}"
+
+        try:
+            data = json.dumps(body).encode("utf-8") if body else None
+            req = URLRequest(target_url, data=data, method="PATCH")
+            req.add_header("Content-Type", "application/json")
+            if handler.headers.get("Authorization"):
+                req.add_header("Authorization", handler.headers["Authorization"])
+            if handler.headers.get("Cookie"):
+                req.add_header("Cookie", handler.headers["Cookie"])
+
+            with urlopen(req, timeout=30) as resp:
+                resp_body = resp.read()
+                handler.send_response(resp.status)
+                for key, val in resp.getheaders():
+                    if key.lower() not in ("transfer-encoding", "connection"):
+                        handler.send_header(key, val)
+                handler.send_header("Content-Length", str(len(resp_body)))
+                handler.end_headers()
+                handler.wfile.write(resp_body)
+        except HTTPError as e:
+            err_body = e.read()
+            handler.send_response(e.code)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(err_body)))
+            handler.end_headers()
+            handler.wfile.write(err_body)
+        except URLError:
+            handler.send_response(502)
+            handler.send_header("Content-Type", "application/json")
+            err = json.dumps({"error": "Olympus backend unreachable"}).encode()
+            handler.send_header("Content-Length", str(len(err)))
+            handler.end_headers()
+            handler.wfile.write(err)
+        return True
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
@@ -7247,10 +7430,46 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
-    # ── Olympus routes ──
+    # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
-        from api.olympus_routes import handle_olympus_delete
-        return handle_olympus_delete(handler, parsed)
+        from urllib.request import Request as URLRequest, urlopen
+        from urllib.error import HTTPError, URLError
+
+        target_url = f"http://127.0.0.1:8788{parsed.path.replace('/olympus', '', 1)}"
+        if parsed.query:
+            target_url += f"?{parsed.query}"
+
+        try:
+            req = URLRequest(target_url, method="DELETE")
+            if handler.headers.get("Authorization"):
+                req.add_header("Authorization", handler.headers["Authorization"])
+            if handler.headers.get("Cookie"):
+                req.add_header("Cookie", handler.headers["Cookie"])
+
+            with urlopen(req, timeout=30) as resp:
+                resp_body = resp.read()
+                handler.send_response(resp.status)
+                for key, val in resp.getheaders():
+                    if key.lower() not in ("transfer-encoding", "connection"):
+                        handler.send_header(key, val)
+                handler.send_header("Content-Length", str(len(resp_body)))
+                handler.end_headers()
+                handler.wfile.write(resp_body)
+        except HTTPError as e:
+            err_body = e.read()
+            handler.send_response(e.code)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(err_body)))
+            handler.end_headers()
+            handler.wfile.write(err_body)
+        except URLError:
+            handler.send_response(502)
+            handler.send_header("Content-Type", "application/json")
+            err = json.dumps({"error": "Olympus backend unreachable"}).encode()
+            handler.send_header("Content-Length", str(len(err)))
+            handler.end_headers()
+            handler.wfile.write(err)
+        return True
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 

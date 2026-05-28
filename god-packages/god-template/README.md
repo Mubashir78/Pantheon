@@ -97,12 +97,17 @@ The Pantheon has a **shared skills hub** at `~/athenaeum/skills/`. These are uni
 - `mcp_pantheon_skill_info` — inspect a skill's arguments
 - `mcp_pantheon_skill_run` — execute a skill with given args
 
-**Example — capture an idea via MCP:**
+**Example — manage project ideas via MCP:**
 ```json
-mcp_pantheon_skill_run({
-  "name": "capture-idea",
-  "arguments": "[\"My Idea\", \"Description of the idea\"]"
-})
+// Use the project-ideas skill (load with skill_view(name='project-ideas'))
+// to manage ~/pantheon/project-ideas.md — the canonical project ideas list.
+// Prefer calling /api/ideas* endpoints on the Hermes gateway for CRUD:
+//   GET  /api/ideas        — list all ideas
+//   POST /api/ideas/add    — add a new entry
+//   POST /api/ideas/edit   — edit an entry
+//   POST /api/ideas/delete — delete an entry
+//   POST /api/ideas/status — update status
+//   POST /api/ideas/reorder  — reorder entries (supports full order array)
 ```
 
 ## Note on Inbox Checking

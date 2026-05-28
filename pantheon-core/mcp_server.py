@@ -67,31 +67,70 @@ class _Embedder:
 
     @property
     def use_openrouter(self) -> bool:
+        provider = os.environ.get("ATHENAEUM_EMBED_PROVIDER", "").lower()
+        if provider == "ollama":
+            return False
         return bool(self._api_key)
 
     def embed(self, text: str) -> List[float]:
         import httpx
 
-        if self.use_openrouter:
-            resp = httpx.post(
-                "https://openrouter.ai/api/v1/embeddings",
-                headers={
+        # nomic-embed-text has a ~512-token / ~2000-char limit.
+        # Chunk at 1500 chars with overlap to stay safe.
+        CHUNK_SIZE = 1500
+        CHUNK_OVERLAP = 100
+        MAX_CHUNKS = 20
+
+        def _call_api(payload: dict) -> List[float]:
+            if self.use_openrouter:
+                url = "https://openrouter.ai/api/v1/embeddings"
+                headers = {
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
-                },
-                json={"model": self._model, "input": text},
-                timeout=self._timeout,
-            )
+                }
+            else:
+                url = "http://localhost:11434/api/embeddings"
+                headers = {"Content-Type": "application/json"}
+            resp = httpx.post(url, headers=headers, json=payload, timeout=self._timeout)
             resp.raise_for_status()
-            return resp.json()["data"][0]["embedding"]
-        else:
-            resp = httpx.post(
-                "http://localhost:11434/api/embeddings",
-                json={"model": "nomic-embed-text", "prompt": text},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
+            if self.use_openrouter:
+                return resp.json()["data"][0]["embedding"]
             return resp.json()["embedding"]
+
+        if len(text) <= CHUNK_SIZE:
+            if self.use_openrouter:
+                return _call_api({"model": self._model, "input": text})
+            return _call_api({"model": "nomic-embed-text", "prompt": text})
+
+        # Chunk long texts and average
+        chunks = []
+        start = 0
+        while start < len(text) and len(chunks) < MAX_CHUNKS:
+            end = min(start + CHUNK_SIZE, len(text))
+            if end < len(text):
+                cut = text.rfind(". ", start + CHUNK_SIZE - 200, end)
+                if cut > start + CHUNK_SIZE // 2:
+                    end = cut + 1
+            chunks.append(text[start:end])
+            start = end - CHUNK_OVERLAP if end < len(text) else end
+
+        vectors = []
+        for chunk in chunks:
+            if self.use_openrouter:
+                v = _call_api({"model": self._model, "input": chunk})
+            else:
+                v = _call_api({"model": "nomic-embed-text", "prompt": chunk})
+            vectors.append(v)
+
+        if not vectors:
+            raise RuntimeError("embedding failed for all chunks")
+
+        dim = len(vectors[0])
+        avg = [0.0] * dim
+        for v in vectors:
+            for i in range(dim):
+                avg[i] += v[i]
+        return [x / len(vectors) for x in avg]
 
     def embed_chunks(self, text: str) -> List[List[float]]:
         """Embed text in chunks and return averaged vector."""
@@ -152,6 +191,40 @@ def _get_chroma_client():
     except Exception as exc:
         logger.warning("ChromaDB unavailable: %s", exc)
         return None
+
+
+def _embed_file_background(file_path: str, content: str, codex_hint: str = "") -> None:
+    """Embed a single file into ChromaDB. Non-blocking — failures are logged, not raised."""
+    try:
+        client = _get_chroma_client()
+        if client is None:
+            return
+        embedder = _Embedder()
+        if not embedder.is_available():
+            return
+
+        # Determine codex from file path
+        rel = Path(file_path).relative_to(_ATHENAEUM_ROOT)
+        codex = codex_hint or rel.parts[0]
+        col_name = f"pantheon_{codex.lower().replace('-', '_')}"
+
+        # Get or create the collection
+        try:
+            collection = client.get_collection(col_name)
+        except Exception:
+            collection = client.create_collection(col_name)
+
+        # Embed and upsert (truncate to ~4K chars for nomic-embed-text context limit)
+        embedding = embedder.embed(content[:4000])
+        collection.upsert(
+            ids=[str(Path(file_path).resolve())],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[{"source": file_path, "codex": codex, "filename": Path(file_path).name}],
+        )
+        logger.info("Embedded: %s → %s", rel, col_name)
+    except Exception as exc:
+        logger.warning("Background embed failed for %s: %s", file_path, exc)
 
 
 def _list_codexes() -> List[str]:
@@ -471,6 +544,12 @@ def athenaeum_write(
 
     try:
         full_path.write_text(content, encoding="utf-8")
+        # ── Auto-embed into ChromaDB ─────────────────────────────────
+        if full_path.suffix.lower() in _EMBEDDABLE_EXTS and full_path.name != "INDEX.md":
+            try:
+                _embed_file_background(str(full_path), content, codex)
+            except Exception:
+                pass  # never fail a write because embedding is down
         return json.dumps({
             "success": True,
             "path": str(full_path.relative_to(_ATHENAEUM_ROOT)),
@@ -773,7 +852,7 @@ def god_list() -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 @mcp.tool(
-    description="Fused search across all Ichor memory backends (FTS5 keyword + ChromaDB semantic + Graph relationships + structured events). Returns ranked results with fused relevance scores. Part of the Memory Trait Contract.",
+    description="Fused search across all Ichor memory backends (FTS5 keyword + ChromaDB semantic + Graph relationships + structured events). Returns ranked results with fused relevance scores. ⚠️ SYSTEM RULE: When ChromaDB returns both a distilled document and a raw session for the same topic, the distilled document is always ranked higher by design. Use the distilled doc as your primary context — it's the canonical LLM-optimized summary. Only fall back to the raw session if you need more detail than the distilled version provides. Part of the Memory Trait Contract.",
 )
 def ichor_retrieve(
     query: str,
@@ -819,8 +898,24 @@ def ichor_retrieve(
 # ═══════════════════════════════════════════════════════════════════════════
 
 @mcp.tool(
-    description="Store content into Ichor memory — auto-routes to correct backend based on category. Part of the Memory Trait Contract. Categories: fact, preference, decision, commitment, insight, blocker, follow_up → ichor_events (FTS5). document, note → Athenaeum files. entity, relationship → Graph DB.",
-)
+    description="""Store content into Ichor memory — auto-routes to correct backend based on category.
+
+FORGE INSTRUCTIONS (CRITICAL):
+When you write a memory, ALSO evaluate whether this content affects the user profile or should be shared across the Pantheon:
+  - category='fact|preference|decision|commitment|insight|blocker|follow_up|correction|reference' — standard memory (current)
+  - category='user_md_update' — this content changes what we know about the user. Updates USER.md profile. Write a separate ichor_store call with this category when your memory entry represents a new user preference, habit, correction, or identity detail.
+  - category='digest_entry' — this content matters for other gods/users to know about. Write a separate ichor_store call with this category when your memory is a decision, deployment change, blocker resolution, or other cross-system signal. Include the session_id so others can pull context.
+  - category='entity|relationship' — extract named entities or relationships for the knowledge graph. Write separate ichor_store calls for each entity/relationship found.
+  - 'document|note|reference' — full content stored to Athenaeum + auto-embedded to ChromaDB silently in background.
+
+Think of memory writing as a forge: one important realization → multiple outputs (memory entry, profile update, digest notification, entity extraction). The same LLM context that produced the memory should evaluate all four.
+
+Categories routing:
+  - fact/preference/decision/commitment/insight/blocker/follow_up/correction/reference/user_md_update → ichor_events (FTS5)
+  - entity/relationship → Graph DB
+  - digest_entry → Shared context digest (DIGEST.md)
+  - document/note → Athenaeum files + ChromaDB embed (background)
+""",)
 def ichor_store(
     key: str,
     content: str,
@@ -1292,6 +1387,164 @@ def system_health() -> str:
 
     results["_real_home"] = _REAL_HOME
     return json.dumps(results, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool: system_current_model
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool(
+    description="Get the current model and provider for a session or active profile. "
+    "Returns model name, provider, config source, and whether the model was recently changed. "
+    "Call this from the agent to verify a model change took effect on the backend.",
+)
+def system_current_model(
+    session_id: str = "",
+    profile_name: str = "",
+) -> str:
+    """Retrieve the current model configuration for a running session or god profile.
+
+    Args:
+        session_id: Optional WebUI session ID to look up. When provided, checks the
+                    WebUI session index first for the per-session model override.
+        profile_name: Optional god/profile name (e.g. 'hephaestus', 'hermes').
+                      Defaults to the active Hermes profile.
+
+    Returns:
+        JSON with model, provider, source, and whether a recent change was detected.
+    """
+    import subprocess
+    import yaml
+    from pathlib import Path
+
+    result = {
+        "model": None,
+        "provider": None,
+        "source": None,
+        "base_url": None,
+        "recently_changed": False,
+    }
+
+    hermes_home = Path(f"{_REAL_HOME}/.hermes")
+
+    # ── Step 1: If session_id given, check WebUI session index ──
+    webui_session = None
+    if session_id:
+        index_path = hermes_home / "webui" / "sessions" / "_index.json"
+        if index_path.exists():
+            try:
+                idx_data = json.loads(index_path.read_text(encoding="utf-8"))
+                for entry in idx_data:
+                    if entry.get("session_id") == session_id and entry.get("model"):
+                        webui_session = entry
+                        break
+            except Exception:
+                pass
+        # If not found in index, try direct session file
+        if not webui_session:
+            sess_file = hermes_home / "webui" / "sessions" / f"{session_id}.json"
+            if sess_file.exists():
+                try:
+                    sess_data = json.loads(sess_file.read_text(encoding="utf-8"))
+                    if sess_data.get("model"):
+                        webui_session = sess_data
+                except Exception:
+                    pass
+
+        if webui_session:
+            result["model"] = webui_session.get("model", result["model"])
+            result["provider"] = webui_session.get("model_provider", result["provider"])
+            result["source"] = "session_override"
+
+    # ── Step 2: Read profile config for the default model ──
+    if not profile_name:
+        # Try to detect active profile from running gateway processes
+        try:
+            ps_out = subprocess.run(
+                ["ps", "aux"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            for line in ps_out.splitlines():
+                if "--profile" in line and "gateway" in line:
+                    for i, p in enumerate(line.split()):
+                        if p == "--profile" and i + 1 < len(line.split()):
+                            candidate = line.split()[i + 1].strip()
+                            if candidate:
+                                profile_name = candidate
+                                break
+                    if profile_name:
+                        break
+        except Exception:
+            pass
+
+    if not profile_name:
+        # Fallback: check active Hermes config
+        profile_name = "hephaestus"  # sensible default
+
+    # Try profile config first, then main config
+    config_sources = [
+        hermes_home / "profiles" / profile_name / "config.yaml",
+        hermes_home / "config.yaml",
+    ]
+    for cfg_path in config_sources:
+        if cfg_path.exists():
+            try:
+                with open(str(cfg_path), "r") as f:
+                    cfg = yaml.safe_load(f) or {}
+                model_cfg = cfg.get("model", {})
+                if isinstance(model_cfg, str):
+                    profile_model = model_cfg
+                    profile_provider = None
+                elif isinstance(model_cfg, dict):
+                    profile_model = model_cfg.get("default", model_cfg.get("model"))
+                    profile_provider = model_cfg.get("provider")
+                    base_url = model_cfg.get("base_url", "")
+                    if base_url:
+                        result["base_url"] = base_url
+                else:
+                    profile_model = None
+                    profile_provider = None
+
+                if profile_model and not result.get("model"):
+                    result["model"] = profile_model
+                if profile_provider and not result.get("provider"):
+                    result["provider"] = profile_provider
+                if not result.get("source"):
+                    source_path = str(cfg_path)
+                    if "profiles" in source_path:
+                        result["source"] = f"profile:{profile_name}"
+                    else:
+                        result["source"] = "main_config"
+                break
+            except Exception:
+                pass
+
+    # ── Step 3: Check Ichor for recent model-change events ──
+    try:
+        import sqlite3
+        ichor_db = hermes_home / "ichor.db"
+        if ichor_db.exists():
+            conn = sqlite3.connect(str(ichor_db))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT raw_text, created_at FROM ichor_events "
+                "WHERE event_type = 'model_change' AND created_at > ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 300)),),  # last 5 minutes
+            ).fetchone()
+            if row:
+                result["recently_changed"] = True
+                try:
+                    change_data = json.loads(row["raw_text"])
+                    result["previous_model"] = change_data.get("previous_model")
+                    result["change_timestamp"] = change_data.get("iso_timestamp", row["created_at"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            conn.close()
+    except Exception:
+        pass
+
+    return json.dumps(result, indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

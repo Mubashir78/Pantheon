@@ -9,7 +9,7 @@
 // Bumps automatically whenever the git commit changes — no manual edits needed.
 // Bump to force SW cache refresh: 2026-05-15 (firefox-tdz-fix)
 // 2026-05-11: ideas edit modal — click-to-edit with inline onclick, backdrop close, section/status/notes editing
-const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__-v4';
+const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__-v7';
 
 // Static assets that form the app shell.
 //

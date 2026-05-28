@@ -373,7 +373,6 @@ class ForgeAnalyzer:
             pass
 
         # Check for model-specific issues
-        from lib.ichor_gates import STATE_GATE, LOGIC_GATE, PHASE_GATE
         model_counter: Counter[str] = collections.Counter()
         model_fails: Dict[str, int] = {}
         for r in records:

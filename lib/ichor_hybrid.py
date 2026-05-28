@@ -27,7 +27,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,12 +45,15 @@ _ICHOR_DB = _HOME / ".hermes" / "ichor.db"
 _CHROMA_DIR = _HOME / ".hermes" / "pantheon" / "chroma"
 _GRAPH_DB = _HOME / ".hermes" / "pantheon" / "graph.db"
 
+# Retrieval query log — append-only JSONL for forge weight tuning
+_RETRIEVAL_LOG = _HOME / ".hermes" / "pantheon" / "retrieval-log.jsonl"
+
 # Weights for fused scoring
 WEIGHTS = {
-    "fts5": 0.20,
+    "fts5": 0.25,
     "chroma": 0.35,
     "graph": 0.25,
-    "events": 0.20,
+    "events": 0.15,
 }
 
 BACKEND_NAMES = {
@@ -173,6 +178,18 @@ class ChromaBackend:
             norm = max((r["score"] for r in results), default=1.0)
             for r in results:
                 r["score"] = round(r["score"] / norm, 3) if norm > 0 else 0
+
+            # ⚡ SYSTEM RULE: distilled documents always rank above raw sessions.
+            # A distilled doc is the canonical reference — the god reads this first
+            # and only falls back to the raw session if more detail is needed.
+            # Boost by +0.3 ensures distilled docs overtake raw session results
+            # in the fused ranking without distorting relative relevance.
+            for r in results:
+                doc_id = r.get("id", "")
+                if "--distilled" in doc_id or "distilled/" in doc_id:
+                    r["score"] = round(min(r["score"] + 0.3, 1.0), 3)
+
+            results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
 
         except Exception as exc:
@@ -325,30 +342,75 @@ class _Embedder:
 
     @property
     def use_openrouter(self) -> bool:
+        provider = os.environ.get("ATHENAEUM_EMBED_PROVIDER", "").lower()
+        if provider == "ollama":
+            return False
         return bool(self._api_key)
 
     def embed(self, text: str) -> Optional[List[float]]:
         import httpx
-        try:
-            if self.use_openrouter:
-                resp = httpx.post(
-                    "https://openrouter.ai/api/v1/embeddings",
-                    headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
-                    json={"model": self._model, "input": text},
-                    timeout=self._timeout,
-                )
+
+        # nomic-embed-text has a ~512-token / ~2000-char limit.
+        # Chunk at 1500 chars with overlap to stay safe.
+        CHUNK_SIZE = 1500
+        CHUNK_OVERLAP = 100
+        MAX_CHUNKS = 20
+
+        def _call_api(payload: dict) -> Optional[List[float]]:
+            try:
+                if self.use_openrouter:
+                    url = "https://openrouter.ai/api/v1/embeddings"
+                    headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+                else:
+                    url = "http://localhost:11434/api/embeddings"
+                    headers = {"Content-Type": "application/json"}
+                resp = httpx.post(url, headers=headers, json=payload, timeout=self._timeout)
                 resp.raise_for_status()
-                return resp.json()["data"][0]["embedding"]
-            else:
-                resp = httpx.post(
-                    "http://localhost:11434/api/embeddings",
-                    json={"model": "nomic-embed-text", "prompt": text},
-                    timeout=self._timeout,
-                )
-                resp.raise_for_status()
+                if self.use_openrouter:
+                    return resp.json()["data"][0]["embedding"]
                 return resp.json()["embedding"]
-        except Exception:
+            except Exception:
+                return None
+
+        if len(text) <= CHUNK_SIZE:
+            # Short enough to embed directly
+            if self.use_openrouter:
+                return _call_api({"model": self._model, "input": text})
+            return _call_api({"model": "nomic-embed-text", "prompt": text})
+
+        # Chunk long texts and average embeddings
+        chunks = []
+        start = 0
+        while start < len(text) and len(chunks) < MAX_CHUNKS:
+            end = min(start + CHUNK_SIZE, len(text))
+            # Try to break at a sentence boundary
+            if end < len(text):
+                # Look for sentence end within overlap region
+                cut = text.rfind(". ", start + CHUNK_SIZE - 200, end)
+                if cut > start + CHUNK_SIZE // 2:
+                    end = cut + 1
+            chunks.append(text[start:end])
+            start = end - CHUNK_OVERLAP if end < len(text) else end
+
+        vectors = []
+        for chunk in chunks:
+            if self.use_openrouter:
+                v = _call_api({"model": self._model, "input": chunk})
+            else:
+                v = _call_api({"model": "nomic-embed-text", "prompt": chunk})
+            if v:
+                vectors.append(v)
+
+        if not vectors:
             return None
+
+        # Average all chunk embeddings
+        dim = len(vectors[0])
+        avg = [0.0] * dim
+        for v in vectors:
+            for i in range(dim):
+                avg[i] += v[i]
+        return [x / len(vectors) for x in avg]
 
     def is_available(self) -> bool:
         if self.use_openrouter:
@@ -485,6 +547,22 @@ class HybridScorer:
 
         top = deduped[:limit]
 
+        # ── Log query for forge weight tuning ────────────────────────
+        try:
+            entry = {
+                "timestamp": time.time(),
+                "query": query[:200],
+                "weights": dict(WEIGHTS),
+                "result_count": len(top),
+                "result_ids": [r.get("id", "")[:80] for r in top[:10]],
+                "backends_used": backends_used,
+            }
+            _RETRIEVAL_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(_RETRIEVAL_LOG, "a") as _f:
+                _f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass  # Non-fatal — don't break retrieval for logging
+
         return {
             "results": top,
             "query": query,
@@ -523,6 +601,132 @@ class HybridScorer:
 # ===================================================================
 # Memory Trait Contract
 # ===================================================================
+
+
+def _background_embed(
+    file_path: str, content: str, namespace: str, session_id: str = ""
+) -> None:
+    """Fire-and-forget: embed a single document to ChromaDB silently.
+
+    Runs in a daemon thread — never blocks the caller.
+    Only embeds the current document, not a full re-embed.
+    """
+    try:
+        import httpx
+        from pathlib import Path
+
+        embed_url = os.environ.get(
+            "ATHENAEUM_EMBED_URL",
+            "http://localhost:11434/api/embeddings",
+        )
+        embed_model = os.environ.get(
+            "ATHENAEUM_EMBED_MODEL",
+            "nomic-embed-text",
+        )
+
+        # Embed via Ollama
+        resp = httpx.post(
+            embed_url,
+            json={"model": embed_model, "prompt": content[:64000]},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        embedding = resp.json()["embedding"]
+
+        # Write to ChromaDB
+        import chromadb  # noqa: PLC0415
+
+        client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
+        col_name = f"pantheon_{namespace.lower().replace('-', '_')}"
+        try:
+            col = client.get_collection(col_name)
+        except Exception:
+            col = client.create_collection(col_name)
+
+        col.upsert(
+            ids=[file_path],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[{
+                "source": file_path,
+                "codex": namespace,
+                "filename": Path(file_path).name,
+                "session_id": session_id,
+            }],
+        )
+    except Exception as exc:
+        logger.debug("Background embed failed (non-fatal): %s", exc)
+
+
+def _regenerate_context(
+    source_god: str = "",
+    timestamp: str = "",
+    user_id: str | None = None,
+) -> None:
+    """Regenerate CONTEXT_{user_id}.md from DIGEST.md for prompt injection.
+
+    Budget-aware: uses 3% of model context window for the summary.
+    Fires on every digest_entry write — replaces the old 15-min cron.
+    """
+    try:
+        user = user_id or os.environ.get("HERMES_USER_ID", "konan")
+        digest_path = _HOME / "pantheon" / "shared" / "DIGEST.md"
+        context_path = _HOME / "pantheon" / "shared" / f"CONTEXT_{user}.md"
+
+        if not digest_path.exists():
+            logger.debug("CONTEXT: no DIGEST.md yet")
+            return
+
+        # Parse recent digest entries (### timestamp — title format)
+        text = digest_path.read_text(encoding="utf-8")
+        entries = re.findall(
+            r"### (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC) — (.+?)\n"
+            r"- \*\*Source:\*\* (.+?)(?: \|.*)?\n"
+            r"- (.+?)(?=\n### |\n---|\Z)",
+            text,
+            re.DOTALL,
+        )
+
+        if not entries:
+            context_path.write_text("## Recent Decisions\n\n_No recent decisions._\n")
+            return
+
+        # Sort by timestamp descending, take last 48h
+        now = datetime.now(timezone.utc)
+        fresh = []
+        for ts, title, source, body in entries:
+            try:
+                entry_time = datetime.strptime(ts, "%Y-%m-%d %H:%M UTC")
+                entry_time = entry_time.replace(tzinfo=timezone.utc)
+                if (now - entry_time).days < 2:  # Last 48h
+                    clean_body = body.strip().replace("\n", " ")
+                    fresh.append((ts, title, source.strip(), clean_body))
+            except ValueError:
+                continue
+
+        if not fresh:
+            context_path.write_text("## Recent Decisions\n\n_No decisions in last 48h._\n")
+            return
+
+        # Budget: 3% of model context window (default 128k → ~3,800 tokens)
+        budget_chars = int(128000 * 0.03 * 4)  # ~15,360 chars
+        lines = ["## Recent Decisions\n"]
+        used = len("".join(lines))
+
+        for ts, title, source, body in fresh:
+            est = len(body) // 4 + 40
+            if used + est > budget_chars:
+                break
+            lines.append(f"- **{title}** — {body} _({source}, {ts[:10]})_\n")
+            used += est
+
+        context_path.write_text("".join(lines))
+        logger.debug(
+            "CONTEXT regenerated: %d entries, %d chars → %s",
+            len(lines) - 1, used, context_path.name,
+        )
+    except Exception as exc:
+        logger.debug("CONTEXT regeneration failed (non-fatal): %s", exc)
 
 
 class MemoryTrait:
@@ -568,8 +772,9 @@ class MemoryTrait:
         _ensure_imports()
 
         # Route by category
-        if category in ("fact", "preference", "decision", "commitment", "insight", "blocker", "follow_up", "correction", "reference"):
+        if category in ("fact", "preference", "decision", "commitment", "insight", "blocker", "follow_up", "correction", "reference", "user_md_update"):
             # → ichor_events (FTS5)
+            # 'user_md_update' is a forge output — agent-evaluated user profile updates
             from lib.ichor_db import IchorDB  # type: ignore[import-untyped]
             db = IchorDB(db_path=str(_ICHOR_DB))
             db.connect()
@@ -579,8 +784,8 @@ class MemoryTrait:
                 subject=key or content[:60],
                 predicate=category,
                 object=content,
-                confidence=0.9,
-                source="manual",
+                confidence=0.9 if category != "user_md_update" else 0.95,
+                source="forge" if category == "user_md_update" else "manual",
                 raw_text=content,
                 god_name=god_name or namespace,
             )
@@ -604,8 +809,28 @@ class MemoryTrait:
             conn.close()
             return {"stored": True, "backend": "graph", "id": f"graph:{node_id}", "namespace": namespace}
 
+        elif category == "digest_entry":
+            # → Append to shared digest (forge output)
+            digest_path = _HOME / "pantheon" / "shared" / "DIGEST.md"
+            digest_path.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            safe_god = god_name or namespace or "unknown"
+            entry = (
+                f"\n### {timestamp} — {key}\n"
+                f"- **Source:** {safe_god}"
+                f"{f' | Session: `{session_id}`' if session_id else ''}\n"
+                f"- {content}\n"
+            )
+            with open(digest_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+
+            # Also regenerate CONTEXT_{user_id}.md for prompt injection
+            _regenerate_context(safe_god, timestamp)
+
+            return {"stored": True, "backend": "digest", "id": f"digest:{timestamp}", "namespace": namespace}
+
         else:
-            # → ChromaDB (via Athenaeum write) — store as a note
+            # → Write to Athenaeum + background embed
             athenaeum_path = _ensure_imports()
             notes_dir = _HOME / "athenaeum" / "Codex-Pantheon" / "ichor-notes"
             notes_dir.mkdir(parents=True, exist_ok=True)
@@ -616,6 +841,13 @@ class MemoryTrait:
                 f"session_id: {session_id}\n---\n\n{content}\n",
                 encoding="utf-8",
             )
+            # Fire-and-forget: embed this single document silently in background
+            import threading
+            threading.Thread(
+                target=_background_embed,
+                args=(str(note_path), content, namespace, session_id),
+                daemon=True,
+            ).start()
             return {"stored": True, "backend": "athenaeum", "id": str(note_path.relative_to(_HOME)), "namespace": namespace}
 
     def retrieve(
