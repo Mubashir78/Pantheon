@@ -1,0 +1,32 @@
+{
+  "_note": "Sample active connections for Pantheon Sync Scheduler. Real adapters land in T12.",
+  "connections": [
+    {
+      "id": "wiki-dedup",
+      "provider": "wiki-dedup",
+      "plugin": "wiki-dedup",
+      "adapter": "wiki_dedup_adapter",
+      "enabled": true,
+      "sync_interval_minutes": 20,
+      "daily_budget": 1000
+    },
+    {
+      "id": "wiki-provenance",
+      "provider": "wiki-provenance",
+      "plugin": "wiki-provenance",
+      "adapter": "wiki_provenance_adapter",
+      "enabled": true,
+      "sync_interval_minutes": 20,
+      "daily_budget": 1000
+    },
+    {
+      "id": "wikiguard",
+      "provider": "wikiguard",
+      "plugin": "wikiguard",
+      "adapter": "wikiguard_adapter",
+      "enabled": true,
+      "sync_interval_minutes": 20,
+      "daily_budget": 500
+    }
+  ]
+}
