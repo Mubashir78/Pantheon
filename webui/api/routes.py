@@ -4187,21 +4187,31 @@ a:hover{{text-decoration:underline}}
         athenaeum_root = os.path.expanduser("~/athenaeum")
         codexes = []
         exists = False
+        folders = []
 
         # Try exact-capitalization first: Codex-{Name}
         primary = f"Codex-{god_name.capitalize()}"
-        if os.path.isdir(os.path.join(athenaeum_root, primary)):
+        primary_path = os.path.join(athenaeum_root, primary)
+        if os.path.isdir(primary_path):
             exists = True
             codexes.append(primary)
+            # List sub-folders (exclude sessions, archive)
+            EXCLUDED = {"sessions", "archive", "__pycache__"}
+            for item in sorted(os.listdir(primary_path)):
+                item_path = os.path.join(primary_path, item)
+                if os.path.isdir(item_path) and item not in EXCLUDED:
+                    file_count = sum(1 for _ in Path(item_path).rglob("*") if _.is_file())
+                    folders.append({"name": item, "file_count": file_count})
 
         # Also try Codex-God-{name} prefix variant
         god_prefix = f"Codex-God-{god_name}"
-        if os.path.isdir(os.path.join(athenaeum_root, god_prefix)):
+        god_prefix_path = os.path.join(athenaeum_root, god_prefix)
+        if os.path.isdir(god_prefix_path):
             exists = True
             if god_prefix not in codexes:
                 codexes.append(god_prefix)
 
-        return j(handler, {"codexes": codexes, "exists": exists})
+        return j(handler, {"codexes": codexes, "exists": exists, "folders": folders})
 
     # ── God Skills (GET) ──
     if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/skills"):
