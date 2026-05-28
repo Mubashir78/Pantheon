@@ -1183,6 +1183,77 @@ def register_core_gods() -> dict:
     return {"gods": gods, "all_registered": all_registered}
 
 
+# ── Ollama model installation (#T15b / onboarding wizard Step 2) ─────────────
+
+_OLLAMA_SETUP_SCRIPT = str(
+    Path(__file__).resolve().parent.parent.parent
+    / "scripts" / "onboarding" / "setup-ollama-models.sh"
+)
+
+
+def install_ollama_models(models: list[str]) -> dict:
+    """Run the Ollama setup script to install selected models.
+
+    Calls ``setup-ollama-models.sh`` with the requested model list.
+    The script outputs one JSON object per line (status updates), which
+    are collected and returned so the onboarding UI can render progress.
+
+    Returns:
+        {"ok": true, "results": [{"model": "...", "status": "done", ...}, ...]}
+        or {"ok": false, "error": "..."} on failure.
+    """
+    import subprocess
+
+    if not models:
+        return {"ok": False, "error": "No models selected"}
+
+    script_path = Path(_OLLAMA_SETUP_SCRIPT)
+    if not script_path.exists():
+        return {
+            "ok": False,
+            "error": f"Setup script not found: {_OLLAMA_SETUP_SCRIPT}",
+        }
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)] + [m for m in models],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,  # 10 min — model downloads can be large
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Model installation timed out (10 min)"}
+    except FileNotFoundError:
+        return {"ok": False, "error": "bash not found — cannot run setup script"}
+    except Exception as exc:
+        logger.debug("install_ollama_models failed", exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+    # Parse JSON lines from script output
+    results: list[dict] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            results.append(json.loads(line))
+        except json.JSONDecodeError:
+            logger.debug("install_ollama_models: non-JSON line: %s", line[:120])
+
+    # If the script exited non-zero but produced partial results, return them
+    # with the error context so the UI can surface what failed.
+    if result.returncode != 0:
+        stderr_msg = result.stderr.strip()[:500] if result.stderr else "unknown error"
+        return {
+            "ok": False,
+            "error": f"Setup script exited {result.returncode}: {stderr_msg}",
+            "results": results,
+        }
+
+    return {"ok": True, "results": results}
+
+
 def complete_onboarding() -> dict:
     save_settings({"onboarding_completed": True})
     return get_onboarding_status()

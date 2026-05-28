@@ -348,8 +348,8 @@ def _walk_codex_files(codex_root: Path) -> Dict[str, List[Path]]:
         rel = f.relative_to(codex_root)
         parts = rel.parts
 
-        # Skip hidden files
-        if f.name.startswith("."):
+        # Skip hidden files and files inside hidden directories (e.g. .git/)
+        if any(p.startswith(".") for p in parts):
             continue
         # Skip INDEX.md — navigation, not content
         if f.name == "INDEX.md":
@@ -536,9 +536,11 @@ def run_health_checks() -> Dict[str, Any]:
         # Chroma vs FS comparison — path-based matching (same approach as spot-fix)
         chroma_sources = chroma_paths.get(codex_name, set())
 
-        # All embeddable files on disk across all subdirs (root + distilled + sessions)
+        # All embeddable files on disk across all subdirs (root + distilled)
+        # NOTE: sessions/ are NOT included — they go through the distillation pipeline
+        # and get embedded as distilled docs, not raw content
         disk_files: set = set()
-        for f in info["files"] + info["distilled"] + info["sessions"]:
+        for f in info["embeddable"] + info["distilled"]:
             disk_files.add(str(f.absolute()))
 
         # Files present in both Chroma and disk
@@ -551,7 +553,7 @@ def run_health_checks() -> Dict[str, Any]:
         chroma_only = chroma_sources - disk_files
 
         # "Embedded" = root-level files that have a matching Chroma entry
-        root_files_set = set(str(f.absolute()) for f in info["files"])
+        root_files_set = set(str(f.absolute()) for f in info["embeddable"])
         embedded_root = len(root_files_set & chroma_sources)
         health["codexes"][codex_name]["embedded"] = embedded_root
 

@@ -1901,6 +1901,7 @@ from api.onboarding import (
     get_hardware_info,
     get_onboarding_status,
     complete_onboarding,
+    install_ollama_models,
     probe_provider_endpoint,
     register_core_gods,
     verify_opencode_key,
@@ -6473,6 +6474,15 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/onboarding/register-gods":
         try:
             return j(handler, register_core_gods())
+        except Exception as e:
+            return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/onboarding/install-models":
+        try:
+            models = (body or {}).get("models", [])
+            if not isinstance(models, list):
+                return bad(handler, "models must be an array", 400)
+            return j(handler, install_ollama_models(models))
         except Exception as e:
             return bad(handler, str(e), 500)
 
