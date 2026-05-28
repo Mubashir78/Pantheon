@@ -80,20 +80,42 @@ for cmd in curl git python3; do
   fi
 done
 
-# ── Step 2: Install Hermes Agent ────────────────────────────────────────────
+# ── Step 2: Clone Pantheon (with pinned Hermes submodule) ────────────────
+header "Pantheon Repository"
+
+if [ -d "$PANTHEON_DIR/.git" ]; then
+  ok "Pantheon already cloned at $PANTHEON_DIR"
+  info "Pulling latest changes..."
+  cd "$PANTHEON_DIR" && git pull --ff-only 2>/dev/null && ok "Updated to latest" || warn "Could not pull (you may have local changes)"
+  info "Updating submodules..."
+  cd "$PANTHEON_DIR" && git submodule update --init --recursive 2>/dev/null && ok "Submodules updated" || warn "Submodule update failed"
+else
+  info "Cloning Pantheon to $PANTHEON_DIR..."
+  git clone --recurse-submodules https://github.com/Duskript/Pantheon.git "$PANTHEON_DIR"
+  ok "Pantheon cloned"
+fi
+
+cd "$PANTHEON_DIR"
+
+# ── Step 3: Install Hermes Agent (pinned version from submodule) ─────────
 header "Hermes Agent"
 
-if command -v hermes >/dev/null 2>&1; then
-  ok "Hermes Agent already installed ($(hermes --version 2>/dev/null || echo 'unknown version'))"
+if command -v hermes >/dev/null 2>&1 && [ -f "$HERMES_DIR/hermes-agent/.pantheon-pinned" ]; then
+  ok "Pantheon-pinned Hermes Agent already installed ($(hermes --version 2>/dev/null || echo 'unknown version'))"
 else
-  info "Installing Hermes Agent..."
-  if curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh; then
-    ok "Hermes Agent installed"
+  info "Installing Hermes Agent from pinned submodule..."
+  if pip install -e "$PANTHEON_DIR/hermes-agent" 2>/dev/null; then
+    ok "Hermes Agent installed (pinned to $(cd $PANTHEON_DIR/hermes-agent && git describe --tags 2>/dev/null || echo 'v0.15.0'))"
+    # Mark this as the pinned version
+    touch "$HERMES_DIR/hermes-agent/.pantheon-pinned"
+    # Lock Hermes updates — Pantheon manages this version
+    touch "$HERMES_DIR/.update-locked"
+    ok "Hermes updates locked to Pantheon-managed version"
     # Refresh PATH
     export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
   else
     err "Hermes Agent installation failed."
-    warn "Try: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh"
+    warn "Try: cd ~/pantheon/hermes-agent && pip install -e ."
     exit 1
   fi
 fi
@@ -102,21 +124,6 @@ fi
 if ! command -v hermes >/dev/null 2>&1; then
   export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 fi
-
-# ── Step 3: Clone Pantheon ──────────────────────────────────────────────────
-header "Pantheon Repository"
-
-if [ -d "$PANTHEON_DIR/.git" ]; then
-  ok "Pantheon already cloned at $PANTHEON_DIR"
-  info "Pulling latest changes..."
-  cd "$PANTHEON_DIR" && git pull --ff-only 2>/dev/null && ok "Updated to latest" || warn "Could not pull (you may have local changes)"
-else
-  info "Cloning Pantheon to $PANTHEON_DIR..."
-  git clone https://github.com/Duskript/Pantheon.git "$PANTHEON_DIR"
-  ok "Pantheon cloned"
-fi
-
-cd "$PANTHEON_DIR"
 
 # ── Step 4: Create .env ─────────────────────────────────────────────────────
 header "Environment Configuration"
