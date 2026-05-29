@@ -1021,9 +1021,11 @@ GIT:
 
 | Field | Value |
 |-------|-------|
-| **Status** | 🔲 |
+| **Status** | ✅ |
+| **Commits** | `d67be8a` (Olympus-UI), `d4e0e98` (Pantheon) |
 | **Depends on** | T1 |
-| **Files** | `src/lib/theme.ts`, `src/index.css`, Olympus backend: `/api/theme` |
+| **Files** | `src/stores/theme-store.ts` + test, `src/components/settings/AppearanceTab.tsx` + test, `src/components/admin/SettingsRoot.tsx`, `config/olympus-theme.yaml`, `routes.py` |
+| **Note** | Theme YAML → CSS variables on :root at runtime. Color swatches in Settings → Appearance. Terminology map via t() function. ⚠️ DEFERRED: ~50 hardcoded hex colors (#22c55e, #e06060) across components need replacement with var(--color-success)/var(--color-danger) — tracked as T18b. |
 
 **What:** Config-driven theme. YAML at `~/pantheon/config/olympus-theme.yaml`. Runtime loading. Terminology map. Appearance tab in Settings. Don't paint into corners — no hardcoded values.
 
@@ -1207,10 +1209,10 @@ GIT:
 | **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete |
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
-| **Tier 5 — Polish** (T18–T20) | 1/3 | T19 ✅, T18 🔲, T20 🔲 |
+| **Tier 5 — Polish** (T18–T20) | 2/3 | T18 ✅, T19 ✅, T20 🔲 |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started |
 
-**Build complete: 28/31 tasks (90%)**
+**Build complete: 29/31 tasks (94%)**
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.
@@ -1224,4 +1226,5 @@ GIT:
 - **T13 (2026-05-28 audit):** Commit was TBD — filled with `0f959ef` (scheduler) + `12ad4a7` (adapters). Pipeline files at `~/athenaeum/Codex-Stream/ingest/` are not git-tracked.
 - **T14 (2026-05-28 audit):** Commit was TBD — filled with `b22d550`. OAuth components + ConnectionManager all committed in that changeset.
 - **T15 (2026-05-28 audit):** Commit was TBD — filled with `b5f0c32`, `00a3463`, `78f05f7`, `88f3778`.
-- **T17 (2026-05-28 audit):** Route wired (`stream.lazy.tsx` + `router.tsx`), 47 tests added (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅. (`stream.lazy.tsx` missing, not in `router.tsx`) and ZERO test files. Status changed from 🔲/✅ → 🔄 PARTIAL. Summary count adjusted: 28→27.
+- **T17 (2026-05-28 audit):** Route wired (`stream.lazy.tsx` + `router.tsx`), 47 tests added (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅.
+- **T18 (2026-05-28 audit):** Theme infrastructure built — GET/PUT /api/theme, olympus-theme.yaml, theme-store.ts, AppearanceTab with color swatches. 39 files / 492 tests — all pass. Hardcoded hex color replacement (~50 instances) deferred to T18b. (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅. (`stream.lazy.tsx` missing, not in `router.tsx`) and ZERO test files. Status changed from 🔲/✅ → 🔄 PARTIAL. Summary count adjusted: 28→27.
