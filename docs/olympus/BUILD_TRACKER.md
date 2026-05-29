@@ -1077,9 +1077,10 @@ GIT:
 
 | Field | Value |
 |-------|-------|
-| **Status** | 🔲 |
+| **Status** | ✅ |
+| **Commit** | `36f9067` |
 | **Depends on** | T19, T1 |
-| **Files** | `TasksPanel.tsx` |
+| **Files** | `TasksPanel.tsx` + test (8 tests), `AdminPanel.tsx`, `feature-flag-store.ts` (+ `tasks` toggle) |
 
 **What:** Tasks tab in Admin. Pull from existing Hermes integration. Create/edit/complete tasks. Feature-flag gated.
 
@@ -1209,10 +1210,10 @@ GIT:
 | **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete |
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
-| **Tier 5 — Polish** (T18–T20) | 2/3 | T18 ✅, T19 ✅, T20 🔲 |
+| **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started |
 
-**Build complete: 29/31 tasks (94%)**
+**Build complete: 30/31 tasks (97%)**
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.
@@ -1227,4 +1228,5 @@ GIT:
 - **T14 (2026-05-28 audit):** Commit was TBD — filled with `b22d550`. OAuth components + ConnectionManager all committed in that changeset.
 - **T15 (2026-05-28 audit):** Commit was TBD — filled with `b5f0c32`, `00a3463`, `78f05f7`, `88f3778`.
 - **T17 (2026-05-28 audit):** Route wired (`stream.lazy.tsx` + `router.tsx`), 47 tests added (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅.
-- **T18 (2026-05-28 audit):** Theme infrastructure built — GET/PUT /api/theme, olympus-theme.yaml, theme-store.ts, AppearanceTab with color swatches. 39 files / 492 tests — all pass. Hardcoded hex color replacement (~50 instances) deferred to T18b. (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅. (`stream.lazy.tsx` missing, not in `router.tsx`) and ZERO test files. Status changed from 🔲/✅ → 🔄 PARTIAL. Summary count adjusted: 28→27.
+- **T18 (2026-05-28 audit):** Theme infrastructure built — GET/PUT /api/theme, olympus-theme.yaml, theme-store.ts, AppearanceTab with color swatches. 39 files / 492 tests — all pass. Hardcoded hex color replacement (~50 instances) deferred to T18b.
+- **T20 (2026-05-28 audit):** TasksPanel built — fetches from /api/kanban/board, create/complete via Kanban API. Feature-flagged (tasks, default ON). 8 tests pass. Browser QA: tab visible, form renders, task renders with checkbox. 40 files / 500 tests total. — GET/PUT /api/theme, olympus-theme.yaml, theme-store.ts, AppearanceTab with color swatches. 39 files / 492 tests — all pass. Hardcoded hex color replacement (~50 instances) deferred to T18b. (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅. (`stream.lazy.tsx` missing, not in `router.tsx`) and ZERO test files. Status changed from 🔲/✅ → 🔄 PARTIAL. Summary count adjusted: 28→27.
