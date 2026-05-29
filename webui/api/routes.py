@@ -3338,6 +3338,21 @@ a:hover{{text-decoration:underline}}
             bad(handler, str(exc), status=400)
         return True
 
+    # ── Theme endpoint ──────────────────────────────────────────
+    if parsed.path == "/api/theme":
+        import yaml as _yaml
+        from pathlib import Path as _Path
+        theme_path = _Path.home() / "pantheon" / "config" / "olympus-theme.yaml"
+        try:
+            with open(theme_path, "r") as f:
+                theme = _yaml.safe_load(f) or {}
+            j(handler, theme)
+        except FileNotFoundError:
+            j(handler, {"error": "Theme not configured"}, status=404)
+        except Exception as exc:
+            bad(handler, str(exc), status=500)
+        return True
+
     # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
         from urllib.request import Request as URLRequest, urlopen
@@ -4739,6 +4754,20 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Theme endpoint (PUT) ────────────────────────────────────
+    if parsed.path == "/api/theme":
+        import yaml as _yaml
+        from pathlib import Path as _Path
+        theme_path = _Path.home() / "pantheon" / "config" / "olympus-theme.yaml"
+        try:
+            theme_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(theme_path, "w") as f:
+                _yaml.dump(body, f, default_flow_style=False, allow_unicode=True)
+            j(handler, {"ok": True})
+        except Exception as exc:
+            bad(handler, str(exc), status=500)
+        return True
 
     # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
