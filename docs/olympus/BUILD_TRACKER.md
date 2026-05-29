@@ -974,18 +974,13 @@ GIT:
 
 | Field | Value |
 |-------|-------|
-| **Status** | 🔄 PARTIAL — route not wired, no tests |
-| **Commit** | `5febcd5` (components + store only) |
+| **Status** | ✅ |
+| **Commit** | `5febcd5` (components), `9ee6b6a` (route + tests) |
 | **Depends on** | T13, T1 |
-| **Files** | `src/components/stream/StreamDashboard.tsx`, `src/components/stream/KnowledgeGraph.tsx`, `src/stores/stream-store.ts`. Olympus backend: `/api/stream/*` |
+| **Files** | `src/components/stream/StreamDashboard.tsx` + test, `src/components/stream/KnowledgeGraph.tsx` + test, `src/stores/stream-store.ts` + test, `src/routes/stream.lazy.tsx`, `router.tsx`. Olympus backend: `/api/stream/*` |
+| **Note** | EntityDetailPanel/MemoryMetricsCard/StreamSearchBar are embedded in StreamDashboard (MetricCard, EntityRow) + KnowledgeGraph (search input). 37 test files, 464 tests — all pass. |
 
 **What:** Obsidian-style D3 force-directed knowledge graph as modal overlay. Nodes = entities, edges = co-occurrence, size = hotness. Entity detail panel. Metrics bar.
-
-**⚠️ GAPS (2026-05-28 audit):**
-- No `stream.lazy.tsx` route file — navigating to `/stream` shows 404
-- `/stream` not registered in `router.tsx` route tree
-- Zero test files (tracker requires 4: store + 3 component tests)
-- `EntityDetailPanel`, `MemoryMetricsCard`, `StreamSearchBar` referenced in tracker but only `StreamDashboard` + `KnowledgeGraph` exist on disk
 
 **🚦 QA Gate T17:**
 ```
@@ -1211,11 +1206,11 @@ GIT:
 | **Stream B** (T8–T13) | 6/6 | ✅ Complete |
 | **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete |
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
-| **Stream C — Remaining** (T16–T17) | 1/2 | T16 ✅, T17 🔄 |
+| **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
 | **Tier 5 — Polish** (T18–T20) | 1/3 | T19 ✅, T18 🔲, T20 🔲 |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started |
 
-**Build complete: 27/31 tasks (87%)** — T17 partial (route + tests missing)
+**Build complete: 28/31 tasks (90%)**
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.
@@ -1229,4 +1224,4 @@ GIT:
 - **T13 (2026-05-28 audit):** Commit was TBD — filled with `0f959ef` (scheduler) + `12ad4a7` (adapters). Pipeline files at `~/athenaeum/Codex-Stream/ingest/` are not git-tracked.
 - **T14 (2026-05-28 audit):** Commit was TBD — filled with `b22d550`. OAuth components + ConnectionManager all committed in that changeset.
 - **T15 (2026-05-28 audit):** Commit was TBD — filled with `b5f0c32`, `00a3463`, `78f05f7`, `88f3778`.
-- **T17 (2026-05-28 audit):** Components + store exist (571 lines), backend endpoints live, but NO route wired (`stream.lazy.tsx` missing, not in `router.tsx`) and ZERO test files. Status changed from 🔲/✅ → 🔄 PARTIAL. Summary count adjusted: 28→27.
+- **T17 (2026-05-28 audit):** Route wired (`stream.lazy.tsx` + `router.tsx`), 47 tests added (store + dashboard + graph). 37 files / 464 tests — all pass. Browser QA: metrics bar + entity list + D3 knowledge graph all render with live data. Fixed → ✅. (`stream.lazy.tsx` missing, not in `router.tsx`) and ZERO test files. Status changed from 🔲/✅ → 🔄 PARTIAL. Summary count adjusted: 28→27.
