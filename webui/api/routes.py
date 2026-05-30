@@ -4693,10 +4693,25 @@ a:hover{{text-decoration:underline}}
         except Exception:
             return j(handler, {"notifications": []})
 
-    # ── Connectors API (GET) ──
-# REMOVED (ACI.dev):     if parsed.path == "/api/connectors/catalog":
-#         # REMOVED (ACI.dev dead direction): from api.connectors import handle_get_catalog
-        return handle_get_catalog(handler)
+    # ── SPA fallback ──
+    # Any non-API, non-static path serves the shell (index.html)
+    # so client-side routes like /olympus/ work directly.
+    if not parsed.path.startswith("/api/") and not parsed.path.startswith("/static/"):
+        try:
+            from urllib.parse import quote
+            from api.updates import WEBUI_VERSION
+            version_token = quote(WEBUI_VERSION, safe="")
+            cache_bust = str(int(__import__('time').time()))
+            from api.extensions import inject_extension_tags
+
+            html = _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token).replace("__CACHE_BUST__", cache_bust)
+            return t(
+                handler,
+                inject_extension_tags(html),
+                content_type="text/html; charset=utf-8",
+            )
+        except Exception as exc:
+            return _serve_shell_unavailable(handler, exc)
 
     return False  # 404
 
