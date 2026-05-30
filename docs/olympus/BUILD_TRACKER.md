@@ -80,7 +80,7 @@ Mirror :8787 pattern — always-visible icon overlays: ☆ pin, ▾ context, ✏
 | # | Task | Status | Depends on |
 |---|------|--------|------------|
 | I1 | Audit Hermes Agent plugin hooks — does `on_pre_write` exist for wiki ops? | 🔲 | Nothing |
-| I2 | Research Composio API — client IDs, deep-link URLs, callback pattern | ✅ | Nothing → See composio-setup.md |
+| I2 | Research n8n credential types + BYOK flow | ✅ | Nothing → Deprecated: composio research superseded by n8n |
 
 **Rule:** I1 must complete before Stream B starts. I2 must complete before T14 starts.
 
@@ -1283,16 +1283,64 @@ Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab
 
 **Start a new session to see them:** `mcp_n8n_health`, `mcp_n8n_list_workflows`, etc.
 
-### N6 — Composio Deprecation
+### N6 — Composio Deprecation (REVISED 2026-05-30)
+
+> **⚠️ Previously marked ✅ but was incomplete.** The initial pass only cleaned runtime config (env vars, MCP server, cron symlink). The repo still has composio code in 26 tracked files. This revision defines the full scope.
 
 | Field | Value |
 |---|---|
-| **Status** | ✅ |
-| **Priority** | P2 — cleanup |
+| **Status** | 🔲 |
+| **Priority** | P2 — repo must be COMPLETELY clean of composio |
 | **Depends on** | N4, N5 |
-| **Files** | Archived `composio-setup.md`, removed COMPOSIO env keys, removed composio MCP server, removed sync cron symlink |
 
-Cleanup after migration verified. Keep Codex-Stream pipeline + wiki plugins. Composio `bundles/composio-mcp/` still on disk for reference.
+**What was done (runtime cleanup, keeping):**
+- COMPOSIO env keys removed from `~/.hermes/.env`
+- composio MCP server removed from Hermes config
+- sync cron symlink removed
+- `docs/olympus/deprecated/composio-setup.md` archived
+
+**What remains (the real scope — 28 items across 5 phases):**
+
+#### N6a — Purge composio from repo (delete/strip)
+| # | File | Action |
+|---|---|---|
+| 1 | `bundles/composio-mcp/composio-mcp.yaml` | `git rm` — delete entire `bundles/composio-mcp/` |
+| 2 | `bundles/composio-mcp/setup_credentials.py` | `git rm` (same bundle) |
+| 3 | `bundles/composio-mcp/README.md` | `git rm` (same bundle) |
+| 4 | `docs/olympus/deprecated/composio-setup.md` | `git rm` — remove deprecated doc entirely |
+| 5 | `webui/api/onboarding.py` lines 1311-1513 | Remove `save_composio_key()`, `check_composio()`, `get_composio_connections()` (~200 lines) |
+| 6 | `webui/api/routes.py` lines 1908, 1913-1914, 6567-6572, 6628-6632 | Remove composio imports + 3 route handlers |
+| 7 | `webui/static/assets/*.js` (3 files) | Rebuild after frontend composio removal (or verify composio refs are dead code) |
+
+#### N6b — Update docs and planning
+| # | File | Action |
+|---|---|---|
+| 8 | `planning/ARCHITECTURE.md` line 357 | "Composio MCP — primary service connector" → "n8n MCP — primary service connector" |
+| 9 | `planning/FEATURES.md` lines 227-256 | Remove "Composio MCP" + "Composio Automations" sections |
+| 10 | `scripts/lib/god_cli/templates/config.yaml.j2` lines 54-59 | Remove composio MCP server template entry |
+| 11 | `docs/olympus/QUESTIONS.md` lines 85, 148, 152, 242, 246 | Remove/update composio-related Q&A |
+| 12 | `docs/olympus/BUILD_TRACKER.md` | Replace I2 entry — mark as superseded by n8n |
+| 13 | `olympus-ui skill: references/composio-setup.md` | Delete skill reference file |
+| 14 | `olympus-ui skill: SKILL.md` | Update changelog + reference list mentioning composio |
+
+#### N6c — Rewrite cron/pantheon-sync adapters from composio to n8n
+| # | File | Action |
+|---|---|---|
+| 15 | `cron/pantheon-sync/adapters/base.py` | Replace `_get_composio_client()` + `_exec_composio_tool()` with n8n REST API helpers |
+| 16-23 | `cron/pantheon-sync/adapters/{gmail,github,slack,notion,google_calendar,discord,outlook,microsoft_teams}.py` | Each adapter: swap composio SDK calls for n8n API calls |
+| 24 | `cron/pantheon-sync/test_adapters.py` | Update test for n8n-based adapters |
+| 25 | `cron/pantheon-sync/connections.json` | Remove `composio_account_id` fields from all 8 providers |
+
+#### N6d — Verify and commit
+- [ ] `grep -ri composio ~/pantheon/` returns zero tracked matches
+- [ ] All webui API endpoints still return 200 (no broken imports)
+- [ ] cron/pantheon-sync/ adapters can reach n8n and return data
+- [ ] Olympus UI integrations page loads without errors
+- [ ] Commit with message describing full cleanup scope
+
+| Estimated effort | N6a (deletes): ~30min · N6b (docs): ~30min · N6c (adapters rewrite): ~4-6h · N6d (verify): ~1h |
+|---|---|
+| **Total remaining** | **~6-8 hours of work** |
 
 ---
 
@@ -1419,12 +1467,12 @@ Each concern gets one owner:
 
 ## Current Status Summary
 
-> Updated: 2026-05-30 — N4 complete (34/37, 92%). Tier 7 added (backend refactor, post-ship).
+> Updated: 2026-05-30 — N6 revised with full composio remediation scope (26 tracked files, 28 items). Phase 1: 33/38 tasks (87%).
 
 | Stream / Tier | Tasks | Status |
 |---------------|-------|--------|
 | **Pre-Build** (I1) | 1/1 | ✅ Complete |
-| **Pre-Build** (I2 — Composio) | Archived | ➖ Superseded by N1-N6 |
+| **Pre-Build** (I2 — Composio) | N/A | ➖ Superseded by Stream D (n8n) |
 | **Tier 0** (Foundation) | 0.1–0.5 | ✅ Complete |
 | **Tier 0.5** (Cleanup) | T0.5 | ✅ Complete |
 | **Stream A** (T1–T7) | 7/7 | ✅ Complete |
@@ -1432,21 +1480,19 @@ Each concern gets one owner:
 | **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete (T14 superseded by N4) |
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
-| **Stream D — n8n Migration** (N1–N6) | 6/6 | ✅ Complete |
+| **Stream D — n8n Migration** (N1–N5) | 5/5 | ✅ Complete |
+| **Stream D — Composio Remediation** (N6a–N6d) | 0/4 | 🔲 Full repo composio purge (revised scope) |
 | **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started (n8n-native) |
 | **Tier 7 — Backend Refactor** (T25–T28) | 0/4 | 🔲 Post-ship — build beside, no downtime |
 
-**Phase 1: 36/37 tasks (97%) — 4 Tier 6 remaining**
+**Phase 1: 33/38 tasks (87%) — N6 (4 subtasks) + T21-T24 (4 tasks) remaining**
 **Phase 2: 0/4 Tier 7 tasks — post-ship, runs parallel on port 8788**
 
-### Reconciliation Notes (2026-05-29)
-- **Composio audit:** `COMPOSIO_MANAGE_CONNECTIONS` confirmed 2/8 active (Gmail, GitHub). 6 providers initiated but zero accounts. User confirmed Notion, Drive, Calendar were connected in UI but dropped.
-- **I2 (Composio research):** Archived — superseded by n8n spike and migration plan.
-- **T11-T12 (sync + adapters):** Still functional Python but superseded by n8n workflows (N5).
-- **T14 (OAuth UI):** Same component structure, different backend (n8n API instead of Composio) — N4.
-- **Stream D added:** 6 tasks (N1–N6). N1-N2 immediate (sidebar). N3-N4 core migration. N5-N6 polish.
-- **n8n spike:** Docker v2.22.5 at `localhost:5678`, MCP enabled at `/mcp-server/http`, API key with 68 scopes, 449 credential types verified.
+### Reconciliation Notes (2026-05-30)
+- **N6 revised:** Was incorrectly marked ✅. Original scope (runtime cleanup) complete but repo purge was missed. 26 tracked files still contain composio. Split into N6a-N6d subtasks covering: delete bundles, strip webui code, update docs/planning, rewrite cron adapters to n8n API, verify zero composio remains.
+- **Build count adjusted:** 36/37 → 33/38. N6 expanded from 1 task → 4 subtasks.
+- **Composio purge audit:** Full map of 28 items at `docs/olympus/BUILD_TRACKER.md` (N6 section).
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.

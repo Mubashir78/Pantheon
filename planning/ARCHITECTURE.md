@@ -354,7 +354,7 @@ Ichor Memory — Multi-Backend Fused Search
   - Serves: Athenaeum (search, walk, read, write), Ichor (health, retrieve, store, forget, brief, graph_query), God list, Hades reports, Skill info/run, Messaging
   - Configured in each god's `config.yaml` under `mcp_servers:`
 
-**External:** Composio MCP — primary external service connector
+**External:** n8n MCP — primary external service connector
 
 **MCP tool registration:** Tools defined in each god's config, served via Hermes Agent's native MCP client
 

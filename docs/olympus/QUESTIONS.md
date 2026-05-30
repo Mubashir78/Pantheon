@@ -82,7 +82,7 @@
 - Profile — display name, avatar, color
 - Appearance/Theme — colors, density, logos
 - Notifications — preferences, polling interval
-- Integrations — Composio OAuth connections
+- Integrations — n8n OAuth connections
 - Language — preferred language
 - User Cron — current user's cron jobs only
 
@@ -145,11 +145,11 @@
 ---
 
 ### Q3.6 — OAuth redirect URI pattern
-**Context:** T14 builds Composio OAuth flow.
+| **Context:** N4 builds n8n OAuth flow.
 
 **Question:** 
 - What's the callback URL pattern?
-- Where are Composio client IDs and deep-link URLs documented?
+- Where are n8n credential types documented?
 
 **Answer:** 
 
@@ -239,15 +239,7 @@ Settings and Admin remain rail-triggered overlays. Stream and Onboarding are ful
 ### Q7.2 — Kanban investigation scope
 **Answer:** ✅ Kanban works on :8787 and in Hermes Agent's built-in dashboard. The 500 from Olympus is likely a wrong API path or proxy issue. Task: investigate working implementations' API paths → fix URL in Olympus.
 
-**Answer:** ✅ Research and document as part of T14 task. Hephaestus will investigate Composio API setup — client IDs, deep-link URLs for Gmail/GitHub/Slack, callback URL pattern, and integration guide — before building the OAuth components.
-
 ---
-
-### Q8.1 — Composio reference documentation
-**Answer:** ⬆️ Same as Q3.6 — covered by T14 research task.
-
----
-
 ### Q8.2 — Hermes plugin hooks
 **Context:** T8-T10 build Hermes plugins that use `on_pre_write` hook.
 

@@ -1905,13 +1905,10 @@ from api.onboarding import (
     probe_provider_endpoint,
     register_core_gods,
     save_byok_key,
-    save_composio_key,
     install_voice_provider,
     verify_opencode_key,
     start_context_gathering,
     get_context_gathering_status,
-    check_composio,
-    get_composio_connections,
 )
 from api.stream import get_stream_entities, get_stream_edges, get_stream_metrics
 from api.oauth import (
@@ -6564,13 +6561,6 @@ def handle_post(handler, parsed) -> bool:
         except Exception as e:
             return bad(handler, str(e), 400)
 
-    if parsed.path == "/api/onboarding/save-composio-key":
-        api_key = str((body or {}).get("api_key") or "").strip()
-        try:
-            return j(handler, save_composio_key(api_key))
-        except Exception as e:
-            return bad(handler, str(e), 400)
-
     if parsed.path == "/api/onboarding/verify-opencode":
         # Verify an OpenCode Go API key by listing available models (#T15c).
         # Read-only: no config.yaml writes.  Inherits the same local-network
@@ -6624,12 +6614,6 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/context-gathering/status":
         return j(handler, get_context_gathering_status())
-
-    if parsed.path == "/api/onboarding/check-composio":
-        return j(handler, check_composio())
-
-    if parsed.path == "/api/onboarding/composio-connections":
-        return j(handler, get_composio_connections())
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":

@@ -224,36 +224,10 @@ GitHub integration MCP server providing repository management, issue tracking, p
 ### Playwright MCP (Browser Automation)
 Browser automation MCP server powered by Playwright. Provides web navigation, clicking, typing, screenshots, form filling, and network request inspection. Enables gods to automate web-based tasks and scrape information from websites.
 
-### Composio MCP (500+ App Integrations)
-External service connector providing access to 500+ third-party app integrations including Gmail, Google Calendar, Google Drive, Google Sheets, Slack, Notion, GitHub, Jira, Linear, and many more. The primary way gods interact with external services.
+### n8n Integration Platform
+Self-hosted workflow automation platform providing OAuth2 credential management for 449+ service types including Gmail, Google Calendar, Google Drive, Slack, Notion, GitHub, Discord, Outlook, and Microsoft Teams. Handles OAuth flows, token refresh, and credential lifecycle. Accessible via REST API at `localhost:5678` and MCP server at `localhost:5678/mcp-server/http`. Replaces Composio as the primary external service connector.
 
 ---
-
-## Pre-installed Skills
-
-### hermes-dojo
-A skill that implements a continuous improvement loop: analyze current behavior, identify weaknesses, propose adjustments, apply changes, and verify results. Used by the Ichor Forge and other self-improving components.
-
-### pantheon-operations
-System operations skill providing Pantheon management commands: status checks, service control, health monitoring, and operational reporting.
-
-### pantheon-bridge
-Inter-god communication bridge skill that facilitates message passing, task delegation, and handoff coordination between gods.
-
-### pantheon-digest-generation
-Shared context digest generation skill that compiles cross-god decisions, active tasks, and knowledge updates into the periodic DIGEST.md file.
-
-### pantheon-god-configuration
-God configuration management skill for updating god settings, adjusting model assignments, modifying tool sets, and managing MCP server configurations per god.
-
-### athenaeum-maintenance
-Knowledge base maintenance skill for organizing Codexes, managing INDEX.md files, performing semantic re-embedding, and cleaning up stale content.
-
-### ichor-harness-engineering
-Gate harness engineering skill for analyzing gate performance, tuning RALPH phase detection, adjusting intervention thresholds, and maintaining the gate middleware.
-
-### Composio Automations
-Skill for configuring and orchestrating multi-step automations across the 500+ Composio-connected apps.
 
 ---
 
