@@ -1289,7 +1289,7 @@ Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab
 
 | Field | Value |
 |---|---|
-| **Status** | 🔲 |
+| **Status** | 🔄 In progress (N6a+N6b ✅ — N6c+N6d+N6e 🔲) |
 | **Priority** | P2 — repo must be COMPLETELY clean of composio |
 | **Depends on** | N4, N5 |
 
@@ -1297,7 +1297,18 @@ Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab
 - COMPOSIO env keys removed from `~/.hermes/.env`
 - composio MCP server removed from Hermes config
 - sync cron symlink removed
-- `docs/olympus/deprecated/composio-setup.md` archived
+
+**What was done (N6a+N6b — repo purge, commit `219d84b`):**
+- `git rm` — deleted `bundles/composio-mcp/` (3 files, 146 lines)
+- `git rm` — deleted `docs/olympus/deprecated/composio-setup.md`
+- Stripped `save_composio_key()`, `check_composio()`, `get_composio_connections()` from `onboarding.py` (~200 lines)
+- Stripped composio imports + 3 route handlers from `routes.py`
+- Updated `ARCHITECTURE.md` — Composio MCP → n8n MCP
+- Updated `FEATURES.md` — replaced composio sections with n8n
+- Updated `config.yaml.j2` — removed composio MCP template
+- Updated `QUESTIONS.md` — removed composio Q&A
+- Updated `olympus-ui` skill — removed composio reference
+- Updated `BUILD_TRACKER.md` I2 entry
 
 **What remains (the real scope — 28 items across 5 phases):**
 
@@ -1338,7 +1349,14 @@ Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab
 - [ ] Olympus UI integrations page loads without errors
 - [ ] Commit with message describing full cleanup scope
 
-| Estimated effort | N6a (deletes): ~30min · N6b (docs): ~30min · N6c (adapters rewrite): ~4-6h · N6d (verify): ~1h |
+#### N6e — Replace Connections Panel in Settings/Onboarding
+The Settings → Integrations tab and onboarding Step 4 called the now-removed composio endpoints (`/api/onboarding/check-composio`, `/api/onboarding/composio-connections`). These need to call n8n API instead:
+- `GET /api/n8n/credentials` — list connected services
+- `GET /api/n8n/credentials/{provider}` — check single provider
+- `POST /api/n8n/credentials/{provider}/connect` — initiate OAuth flow
+- Frontend components (`ConnectionManager`, `ConnectionCard`, `OAuthButton`, `useOAuth` hook) already wired to n8n in N4, but verify the flow works end-to-end now that composio endpoints are gone
+
+| Estimated effort | N6a (deletes): ~30min · N6b (docs): ~30min · N6c (adapters rewrite): ~4-6h · N6d (verify): ~1h · N6e (connections panel): ~2-3h |
 |---|---|
 | **Total remaining** | **~6-8 hours of work** |
 
@@ -1467,7 +1485,7 @@ Each concern gets one owner:
 
 ## Current Status Summary
 
-> Updated: 2026-05-30 — N6 revised with full composio remediation scope (26 tracked files, 28 items). Phase 1: 33/38 tasks (87%).
+> Updated: 2026-05-30 — N6a+N6b complete (repo purge + docs). N6c+N6d+N6e remain. Phase 1: 33/38 tasks (87%).
 
 | Stream / Tier | Tasks | Status |
 |---------------|-------|--------|
@@ -1481,18 +1499,18 @@ Each concern gets one owner:
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
 | **Stream D — n8n Migration** (N1–N5) | 5/5 | ✅ Complete |
-| **Stream D — Composio Remediation** (N6a–N6d) | 0/4 | 🔲 Full repo composio purge (revised scope) |
+| **Stream D — Composio Remediation** (N6a–N6e) | 2/5 | 🔄 N6a+N6b done, N6c+N6d+N6e remain |
 | **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started (n8n-native) |
 | **Tier 7 — Backend Refactor** (T25–T28) | 0/4 | 🔲 Post-ship — build beside, no downtime |
 
-**Phase 1: 33/38 tasks (87%) — N6 (4 subtasks) + T21-T24 (4 tasks) remaining**
+**Phase 1: 33/38 tasks (87%) — N6c+N6d+N6e (3 subtasks) + T21-T24 (4 tasks) remaining**
 **Phase 2: 0/4 Tier 7 tasks — post-ship, runs parallel on port 8788**
 
 ### Reconciliation Notes (2026-05-30)
-- **N6 revised:** Was incorrectly marked ✅. Original scope (runtime cleanup) complete but repo purge was missed. 26 tracked files still contain composio. Split into N6a-N6d subtasks covering: delete bundles, strip webui code, update docs/planning, rewrite cron adapters to n8n API, verify zero composio remains.
-- **Build count adjusted:** 36/37 → 33/38. N6 expanded from 1 task → 4 subtasks.
-- **Composio purge audit:** Full map of 28 items at `docs/olympus/BUILD_TRACKER.md` (N6 section).
+- **N6a+N6b complete:** Commit `219d84b`. Deleted bundles/composio-mcp/, stripped onboarding.py + routes.py, updated all docs/planning files, removed composio skill reference. 18 tracked files remain with composio references — 14 expected (cron adapters awaiting N6c rewrite + migration plan docs) and 3 stale JS bundles (dead code, need rebuild).
+- **N6e added:** Connections Panel replacement — Settings → Integrations and onboarding Step 4 currently call removed composio endpoints. Need to verify they use n8n endpoints (`GET /api/n8n/credentials`, etc.) and work end-to-end.
+- **Build count:** 36/37 → 33/38. N6 expanded from 1 task → 5 subtasks.
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.

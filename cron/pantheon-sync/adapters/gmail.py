@@ -1,7 +1,8 @@
 """
 Gmail Sync Adapter.
 
-Fetches recent emails from Gmail via Composio BYOK OAuth.
+Checks Gmail n8n credential status. Actual data sync is handled
+by n8n workflows.
 """
 
 from __future__ import annotations
@@ -13,64 +14,39 @@ from .base import (
     SyncRecord,
     SyncResult,
     register_adapter,
-    _get_composio_client,
-    _get_connected_account_id,
-    _exec_composio_tool,
+    _check_n8n_credential,
 )
 
 
 @register_adapter("gmail")
 class GmailAdapter(BaseAdapter):
-    """Sync adapter for Gmail via Composio."""
+    """Sync adapter for Gmail via n8n credential."""
 
     def sync(
         self, connection: dict[str, Any], cursor: str | None = None
     ) -> SyncResult:
-        client = _get_composio_client(connection)
-        if client is None:
+        cred = _check_n8n_credential(self.provider)
+        if cred.get("error") and not cred["connected"]:
             return SyncResult(
                 provider=self.provider,
                 records=[],
                 status="no_auth",
-                error="Composio API key not configured",
+                error=cred["error"],
             )
-
-        account_id = _get_connected_account_id(client, "gmail", connection)
-        if account_id is None:
+        if not cred["connected"]:
             return SyncResult(
                 provider=self.provider,
                 records=[],
                 status="not_connected",
-                error="No Gmail connected account. Run OAuth flow first.",
+                error="No Gmail credential in n8n. Set up in Settings → Integrations.",
             )
 
-        # Fetch recent unread emails
-        args: dict[str, Any] = {"maxResults": 20, "q": "is:unread"}
-        if cursor:
-            args["q"] = f"after:{cursor}"
-
-        data = _exec_composio_tool(
-            client, account_id, "GMAIL_FETCH_MESSAGES", args
-        )
-
-        if data is None:
-            return SyncResult(
-                provider=self.provider,
-                records=[],
-                status="error",
-                error="Failed to fetch Gmail messages via Composio",
-            )
-
-        messages = data if isinstance(data, list) else data.get("messages", [])
-        records = [self.canonicalize(msg) for msg in messages]
-
-        next_cursor = records[-1].source_id if records else cursor
-
+        # Credential exists — data sync is handled by n8n workflows
         return SyncResult(
             provider=self.provider,
-            records=records,
-            next_cursor=next_cursor,
-            status="ok" if records else "empty",
+            records=[],
+            next_cursor=cursor,
+            status="ok",
         )
 
     def canonicalize(self, raw_item: dict[str, Any]) -> SyncRecord:

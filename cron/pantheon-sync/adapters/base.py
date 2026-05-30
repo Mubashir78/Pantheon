@@ -7,9 +7,17 @@ when adapters import from the package.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,8 +45,9 @@ class SyncResult:
 class BaseAdapter(ABC):
     """Abstract base for provider adapters.
 
-    Each adapter syncs data from one external provider (Gmail, GitHub, etc.)
-    via the user's Composio BYOK connection.
+    Each adapter checks connection status for one external provider (Gmail,
+    GitHub, etc.) via n8n credential management. Actual data sync is handled
+    by n8n workflows.
     """
 
     provider: str = ""
@@ -57,82 +66,135 @@ class BaseAdapter(ABC):
         return f"<{self.__class__.__name__} provider={self.provider!r}>"
 
 
-# ─── Composio helper ──────────────────────────────────────────────
+# ── n8n credential helper ──────────────────────────────────────
 
-def _get_composio_client(connection: dict[str, Any]):
-    """Create a Composio client from connection config.
+N8N_API_BASE = "http://localhost:5678/api/v1"
+N8N_TIMEOUT = 10
 
-    Returns None if no API key is configured (user hasn't set up Composio yet).
-    """
+# Provider → n8n credential type mapping
+# (mirrors webui/api/n8n_client.py PROVIDER_TO_N8N_TYPE)
+PROVIDER_TO_N8N_TYPE: dict[str, str] = {
+    "gmail": "gmailOAuth2Api",
+    "github": "githubOAuth2Api",
+    "google_calendar": "googleCalendarOAuth2Api",
+    "notion": "notionOAuth2Api",
+    "slack": "slackOAuth2Api",
+    "discord": "discordOAuth2Api",
+    "outlook": "microsoftOAuth2Api",
+    "microsoft_teams": "microsoftOAuth2Api",
+}
+
+
+def _get_n8n_api_key() -> str | None:
+    """Get N8N_API_KEY from environment or .env file."""
+    key = os.environ.get("N8N_API_KEY", "")
+    if key:
+        return key
+
+    # Fallback: read from webui .env file
+    env_path = Path.home() / "pantheon" / "webui" / ".env"
     try:
-        from composio import Composio
-    except ImportError:
-        return None
-
-    api_key = (
-        connection.get("composio_api_key")
-        or connection.get("auth", {}).get("api_key")
-    )
-    if not api_key:
-        return None
-
-    try:
-        return Composio(api_key=str(api_key))
-    except Exception:
-        return None
-
-
-def _get_connected_account_id(
-    client, provider: str, connection: dict[str, Any]
-) -> str | None:
-    """Find a connected account ID for the given provider.
-
-    Checks connection config first, then queries Composio's API.
-    """
-    # Check if connection already has a stored account ID
-    stored = connection.get("composio_account_id") or connection.get(
-        "auth", {}
-    ).get("connected_account_id")
-    if stored:
-        return str(stored)
-
-    # Try to discover from Composio
-    try:
-        accounts = client.connected_accounts.list()
-        for acct in accounts:
-            app_name = getattr(acct, "app_name", "") or getattr(
-                acct, "appId", ""
-            )
-            if app_name.lower() == provider.lower():
-                return str(getattr(acct, "id", ""))
+        if env_path.is_file():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:]
+                if line.startswith("N8N_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
     except Exception:
         pass
-
     return None
 
 
-def _exec_composio_tool(
-    client,
-    connected_account_id: str,
-    tool_slug: str,
-    arguments: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Execute a Composio tool and return the parsed result."""
+def _check_n8n_credential(provider: str) -> dict:
+    """Check if an n8n credential exists for the given provider.
+
+    Calls n8n REST API ``GET /api/v1/credentials`` and searches for a
+    credential matching the provider's n8n type.
+
+    Returns:
+        {
+            "connected": bool,
+            "credential_id": str | None,
+            "credential_name": str | None,
+            "error": str | None,
+        }
+    """
+    api_key = _get_n8n_api_key()
+    if not api_key:
+        return {
+            "connected": False,
+            "credential_id": None,
+            "credential_name": None,
+            "error": "N8N_API_KEY not configured. Set up n8n in Settings → Integrations.",
+        }
+
+    n8n_type = PROVIDER_TO_N8N_TYPE.get(provider)
+    if not n8n_type:
+        return {
+            "connected": False,
+            "credential_id": None,
+            "credential_name": None,
+            "error": f"Unknown provider: {provider}",
+        }
+
     try:
-        result = client.tools.execute(
-            slug=tool_slug,
-            arguments=arguments,
-            connected_account_id=connected_account_id,
+        req = urllib.request.Request(
+            f"{N8N_API_BASE}/credentials",
+            headers={
+                "X-N8N-API-KEY": api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
         )
-        # result.data is the raw response — extract what we need
-        if hasattr(result, "data"):
-            return result.data
-        return result
-    except Exception:
-        return None
+        with urllib.request.urlopen(req, timeout=N8N_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        for cred in data.get("data", []):
+            if cred.get("type", "").lower() == n8n_type.lower():
+                return {
+                    "connected": True,
+                    "credential_id": cred.get("id"),
+                    "credential_name": cred.get("name"),
+                    "error": None,
+                }
+
+        return {
+            "connected": False,
+            "credential_id": None,
+            "credential_name": None,
+            "error": None,
+        }
+
+    except urllib.error.HTTPError as exc:
+        logger.warning("n8n credential check failed (HTTP %s): %s", exc.code, exc.reason)
+        return {
+            "connected": False,
+            "credential_id": None,
+            "credential_name": None,
+            "error": f"n8n API error (HTTP {exc.code})",
+        }
+    except urllib.error.URLError as exc:
+        logger.warning("n8n unreachable: %s", exc.reason)
+        return {
+            "connected": False,
+            "credential_id": None,
+            "credential_name": None,
+            "error": f"n8n unreachable: {exc.reason}",
+        }
+    except Exception as exc:
+        logger.warning("n8n credential check error: %s", exc)
+        return {
+            "connected": False,
+            "credential_id": None,
+            "credential_name": None,
+            "error": str(exc),
+        }
 
 
-# ─── Registry ─────────────────────────────────────────────────────
+# ── Registry ────────────────────────────────────────────────────
 
 _registry: dict[str, type[BaseAdapter]] = {}
 

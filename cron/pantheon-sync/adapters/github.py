@@ -1,8 +1,8 @@
 """
 GitHub Sync Adapter.
 
-Fetches recent GitHub events (PRs, issues, commits, stars)
-via Composio BYOK OAuth.
+Checks GitHub n8n credential status. Actual data sync is handled
+by n8n workflows.
 """
 
 from __future__ import annotations
@@ -14,49 +14,35 @@ from .base import (
     SyncRecord,
     SyncResult,
     register_adapter,
-    _get_composio_client,
-    _get_connected_account_id,
-    _exec_composio_tool,
+    _check_n8n_credential,
 )
 
 
 @register_adapter("github")
 class GitHubAdapter(BaseAdapter):
-    """Sync adapter for GitHub via Composio."""
+    """Sync adapter for GitHub via n8n credential."""
 
     def sync(
         self, connection: dict[str, Any], cursor: str | None = None
     ) -> SyncResult:
-        client = _get_composio_client(connection)
-        if client is None:
-            return SyncResult(provider=self.provider, records=[], status="no_auth",
-                              error="Composio API key not configured")
+        cred = _check_n8n_credential(self.provider)
+        if cred.get("error") and not cred["connected"]:
+            return SyncResult(
+                provider=self.provider, records=[], status="no_auth",
+                error=cred["error"],
+            )
+        if not cred["connected"]:
+            return SyncResult(
+                provider=self.provider, records=[], status="not_connected",
+                error="No GitHub credential in n8n. Set up in Settings → Integrations.",
+            )
 
-        account_id = _get_connected_account_id(client, "github", connection)
-        if account_id is None:
-            return SyncResult(provider=self.provider, records=[], status="not_connected",
-                              error="No GitHub connected account. Run OAuth flow first.")
-
-        args: dict[str, Any] = {"per_page": 30}
-        data = _exec_composio_tool(client, account_id, "GITHUB_LIST_USER_EVENTS", args)
-        if data is None:
-            # Fallback: try activity feed
-            data = _exec_composio_tool(client, account_id, "GITHUB_GET_FEED", args)
-
-        if data is None:
-            return SyncResult(provider=self.provider, records=[], status="error",
-                              error="Failed to fetch GitHub events via Composio")
-
-        events = data if isinstance(data, list) else data.get("events", data.get("data", []))
-        if isinstance(events, dict):
-            events = [events]
-        records = [self.canonicalize(evt) for evt in events]
-
+        # Credential exists — data sync is handled by n8n workflows
         return SyncResult(
             provider=self.provider,
-            records=records,
-            next_cursor=records[-1].source_id if records else cursor,
-            status="ok" if records else "empty",
+            records=[],
+            next_cursor=cursor,
+            status="ok",
         )
 
     def canonicalize(self, raw_item: dict[str, Any]) -> SyncRecord:
@@ -83,9 +69,9 @@ class GitHubAdapter(BaseAdapter):
         title = title_map.get(event_type, f"{event_type} on {repo}")
 
         content = f"# [{repo}] {title}\n\n"
-        content += f"**Event:** {event_type} · **Actor:** {actor}"
+        content += f"**Event:** {event_type} \u00b7 **Actor:** {actor}"
         if action:
-            content += f" · **Action:** {action}"
+            content += f" \u00b7 **Action:** {action}"
         content += "\n"
 
         return SyncRecord(

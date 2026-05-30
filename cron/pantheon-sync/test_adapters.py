@@ -27,7 +27,7 @@ def test_adapter_creation():
 
 
 def test_sync_without_auth():
-    """Adapters should return no_auth when no Composio key is configured."""
+    """Adapters should return no_auth when n8n is not configured."""
     for name in list_adapters():
         adapter = get_adapter(name)
         result = adapter.sync({})

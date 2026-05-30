@@ -1,7 +1,8 @@
 """
 Outlook Sync Adapter.
 
-Fetches recent emails from Microsoft Outlook via Composio BYOK OAuth.
+Checks Outlook (Microsoft) n8n credential status. Actual data sync
+is handled by n8n workflows.
 """
 
 from __future__ import annotations
@@ -13,80 +14,65 @@ from .base import (
     SyncRecord,
     SyncResult,
     register_adapter,
-    _get_composio_client,
-    _get_connected_account_id,
-    _exec_composio_tool,
+    _check_n8n_credential,
 )
 
 
 @register_adapter("outlook")
 class OutlookAdapter(BaseAdapter):
-    """Sync adapter for Microsoft Outlook via Composio."""
+    """Sync adapter for Microsoft Outlook via n8n credential."""
 
     def sync(
         self, connection: dict[str, Any], cursor: str | None = None
     ) -> SyncResult:
-        client = _get_composio_client(connection)
-        if client is None:
-            return SyncResult(provider=self.provider, records=[], status="no_auth",
-                              error="Composio API key not configured")
-
-        account_id = _get_connected_account_id(client, "outlook", connection)
-        if account_id is None:
-            return SyncResult(provider=self.provider, records=[], status="not_connected",
-                              error="No Outlook connected account.")
-
-        args: dict[str, Any] = {"top": 20, "$orderby": "receivedDateTime desc"}
-        if cursor:
-            args["$filter"] = f"receivedDateTime gt {cursor}"
-
-        data = _exec_composio_tool(client, account_id, "OUTLOOK_LIST_MESSAGES", args)
-        if data is None:
-            data = _exec_composio_tool(client, account_id, "OUTLOOK_FETCH_EMAILS", args)
-
-        if data is None:
-            return SyncResult(provider=self.provider, records=[], status="error",
-                              error="Failed to fetch Outlook messages")
-
-        messages = data if isinstance(data, list) else data.get("value", data.get("messages", []))
-        if isinstance(messages, dict):
-            messages = [messages]
-        records = [self.canonicalize(msg) for msg in messages]
+        cred = _check_n8n_credential(self.provider)
+        if cred.get("error") and not cred["connected"]:
+            return SyncResult(
+                provider=self.provider, records=[], status="no_auth",
+                error=cred["error"],
+            )
+        if not cred["connected"]:
+            return SyncResult(
+                provider=self.provider, records=[], status="not_connected",
+                error="No Outlook credential in n8n.",
+            )
 
         return SyncResult(
             provider=self.provider,
-            records=records,
-            next_cursor=records[-1].source_id if records else cursor,
-            status="ok" if records else "empty",
+            records=[],
+            next_cursor=cursor,
+            status="ok",
         )
 
     def canonicalize(self, raw_item: dict[str, Any]) -> SyncRecord:
-        sender_data = raw_item.get("from", raw_item.get("sender", {}))
+        # Outlook API nest sender under from.emailAddress
+        sender_data = raw_item.get("from", {})
         if isinstance(sender_data, dict):
-            sender = sender_data.get("emailAddress", {}).get("address", "") if isinstance(sender_data.get("emailAddress"), dict) else sender_data.get("address", "unknown")
+            email_data = sender_data.get("emailAddress", {})
+            sender = email_data.get("address", email_data.get("name", "unknown")) if isinstance(email_data, dict) else str(sender_data)
         else:
-            sender = str(sender_data or "unknown")
+            sender = str(sender_data)
 
         subject = raw_item.get("subject", "(no subject)")
-        body = raw_item.get("body", {}).get("content", "") if isinstance(raw_item.get("body"), dict) else raw_item.get("bodyPreview", raw_item.get("body", ""))
-        categories = raw_item.get("categories", [])
-        msg_id = str(raw_item.get("id", ""))
+
+        # Body may be nested under body.content
+        body_data = raw_item.get("body", {})
+        body = body_data.get("content", raw_item.get("bodyPreview", raw_item.get("body", ""))) if isinstance(body_data, dict) else raw_item.get("body", "")
+
+        msg_id = raw_item.get("id", "")
+        received = raw_item.get("receivedDateTime", raw_item.get("timestamp", ""))
 
         content = f"# {subject}\n\n**From:** {sender}\n\n{body}"
 
         return SyncRecord(
             provider=self.provider,
-            source_id=msg_id,
+            source_id=str(msg_id),
             content=content,
             metadata={
-                "sender": sender,
+                "sender": str(sender),
                 "subject": str(subject),
-                "categories": categories if isinstance(categories, list) else [],
-                "has_attachments": bool(raw_item.get("hasAttachments", False)),
-                "timestamp": raw_item.get("receivedDateTime", raw_item.get("timestamp")),
+                "received": str(received),
+                "conversation_id": raw_item.get("conversationId", ""),
             },
-            tags=["email", "outlook", "microsoft"] + (
-                [f"category:{c.lower()}" for c in categories]
-                if isinstance(categories, list) else []
-            ),
+            tags=["email", "outlook"],
         )
