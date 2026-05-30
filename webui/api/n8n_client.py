@@ -355,6 +355,43 @@ def _required_fields_for(n8n_type: str) -> list[str]:
     return ["clientId", "clientSecret"]
 
 
+def delete_credential(provider: str) -> dict[str, Any]:
+    """Delete a credential for a provider from n8n.
+
+    Finds the credential by n8n type name, then deletes it via the n8n REST API.
+    Used for disconnect in the Olympus UI.
+
+    Returns:
+        {\"status\": \"deleted\", \"credential_id\": str}
+        or {\"status\": \"not_found\"}
+        or {\"status\": \"error\", \"error\": str}
+    """
+    n8n_type = PROVIDER_TO_N8N_TYPE.get(provider)
+    if not n8n_type:
+        return {"status": "error", "error": f"Unknown provider: {provider}"}
+
+    # Find the credential ID
+    resp = _request("GET", "/credentials")
+    if "error" in resp:
+        return {"status": "error", "error": resp["error"]}
+
+    credential_id = None
+    for cred in resp.get("data", []):
+        if cred.get("type") == n8n_type:
+            credential_id = cred.get("id")
+            break
+
+    if not credential_id:
+        return {"status": "not_found", "provider": provider}
+
+    # Delete it
+    del_resp = _request("DELETE", f"/credentials/{credential_id}")
+    if "error" in del_resp:
+        return {"status": "error", "error": del_resp["error"]}
+
+    return {"status": "deleted", "credential_id": credential_id, "provider": provider}
+
+
 def _provider_display_name(provider: str) -> str:
     """Get the display name for a provider ID."""
     for p in PROVIDERS:

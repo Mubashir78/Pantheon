@@ -7633,6 +7633,13 @@ def handle_delete(handler, parsed) -> bool:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
 
+    # ── n8n Credential Delete (DELETE) — disconnect a provider ──
+    if parsed.path.startswith("/api/n8n/credentials/") and not parsed.path.endswith("/connect"):
+        from api.n8n_client import delete_credential
+        provider = parsed.path[len("/api/n8n/credentials/"):]
+        result = delete_credential(provider)
+        return j(handler, result)
+
     # ── God Profile Delete (DELETE) — remove a god profile ──
     if parsed.path.startswith("/api/gods/"):
         parts = parsed.path.strip("/").split("/")
