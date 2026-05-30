@@ -225,7 +225,7 @@ GitHub integration MCP server providing repository management, issue tracking, p
 Browser automation MCP server powered by Playwright. Provides web navigation, clicking, typing, screenshots, form filling, and network request inspection. Enables gods to automate web-based tasks and scrape information from websites.
 
 ### n8n Integration Platform
-Self-hosted workflow automation platform providing OAuth2 credential management for 449+ service types including Gmail, Google Calendar, Google Drive, Slack, Notion, GitHub, Discord, Outlook, and Microsoft Teams. Handles OAuth flows, token refresh, and credential lifecycle. Accessible via REST API at `localhost:5678` and MCP server at `localhost:5678/mcp-server/http`. Replaces Composio as the primary external service connector.
+Self-hosted workflow automation platform providing OAuth2 credential management for 449+ service types including Gmail, Google Calendar, Google Drive, Slack, Notion, GitHub, Discord, Outlook, and Microsoft Teams. Handles OAuth flows, token refresh, and credential lifecycle. Accessible via REST API at `localhost:5678` and MCP server at `localhost:5678/mcp-server/http`. The primary external service connector for Pantheon.
 
 ---
 

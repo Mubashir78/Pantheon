@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -1490,12 +1491,77 @@ _context_gathering_state: dict[str, object] = {
     "error": None,
 }
 
+# n8n API constants (mirrors n8n_client.py)
+_N8N_BASE = "http://localhost:5678"
+_N8N_API_BASE = f"{_N8N_BASE}/api/v1"
+_N8N_TIMEOUT = 10
+
+
+def _get_n8n_api_key() -> str | None:
+    """Get N8N_API_KEY from environment or .env file."""
+    key = os.environ.get("N8N_API_KEY", "")
+    if key:
+        return key
+    env_path = Path.home() / "pantheon" / "webui" / ".env"
+    try:
+        if env_path.is_file():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:]
+                if line.startswith("N8N_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return None
+
+
+def _n8n_credentials() -> list[dict]:
+    """Fetch all n8n credentials via REST API.
+
+    Returns:
+        list of credential dicts with keys: id, name, type, createdAt
+    """
+    api_key = _get_n8n_api_key()
+    if not api_key:
+        return []
+
+    try:
+        req = urllib.request.Request(
+            f"{_N8N_API_BASE}/credentials",
+            headers={
+                "X-N8N-API-KEY": api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=_N8N_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("data", [])
+    except Exception:
+        return []
+
+
+# Map n8n credential types back to Pantheon provider names
+_N8N_TYPE_TO_PROVIDER: dict[str, str] = {
+    "gmailOAuth2Api": "gmail",
+    "githubOAuth2Api": "github",
+    "slackOAuth2Api": "slack",
+    "notionOAuth2Api": "notion",
+    "googleCalendarOAuth2Api": "google_calendar",
+    "discordOAuth2Api": "discord",
+    "microsoftOAuth2Api": "outlook",
+    "microsoftTeamsOAuth2Api": "microsoft_teams",
+}
+
 
 def start_context_gathering() -> dict:
-    """Fire-and-forget: sync connected providers and ingest into Codex-Stream.
+    """Fire-and-forget: check n8n-connected providers and ingest into Codex-Stream.
 
-    Detects connected Composio accounts, runs each registered adapter's
-    ``sync()``, feeds ``SyncRecord`` s into ``ingest_into_codex_stream()``,
+    Lists n8n credentials, runs each registered adapter's ``sync()``,
+    feeds ``SyncRecord`` s into ``ingest_into_codex_stream()``,
     and writes a ``PROFILE.md`` summary to the Athenaeum.
     """
     global _context_gathering_state
@@ -1508,36 +1574,7 @@ def start_context_gathering() -> dict:
     def _run_pipeline():
         global _context_gathering_state
         try:
-            # ── 1. Read MCP OAuth token ──────────────────────────
-            _mcp_token_path = Path.home() / ".hermes" / "mcp-tokens" / "composio.json"
-            if not _mcp_token_path.exists():
-                _context_gathering_state = {
-                    "status": "done",
-                    "error": None,
-                    "detail": "no mcp token",
-                }
-                return
-
-            try:
-                _td = json.loads(_mcp_token_path.read_text())
-                _access_token = _td.get("access_token")
-            except Exception:
-                _context_gathering_state = {
-                    "status": "done",
-                    "error": None,
-                    "detail": "unreadable mcp token",
-                }
-                return
-
-            if not _access_token:
-                _context_gathering_state = {
-                    "status": "done",
-                    "error": None,
-                    "detail": "no access token",
-                }
-                return
-
-            # ── 2. Path setup for pipeline only ───────────────────
+            # ── 1. Path setup for pipeline ──────────────────────────
             import sys as _sys
 
             _pipeline_root = str(
@@ -1548,190 +1585,84 @@ def start_context_gathering() -> dict:
 
             from pipeline import ingest_into_codex_stream
 
-            # ── 3. Discover active connections via MCP ────────────
-            import re as _re
+            # ── 2. Discover connected credentials via n8n ───────────
+            _creds = _n8n_credentials()
+            if not _creds:
+                _get_gathering_logger().info("No n8n credentials found — skipping context gathering")
+                _write_profile_summary([])
+                _context_gathering_state = {
+                    "status": "done",
+                    "error": None,
+                    "detail": "no n8n credentials",
+                }
+                return
 
-            _PROVIDER_TO_TOOLKIT = {
-                "gmail": "gmail",
-                "github": "github",
-                "slack": "slack",
-                "google_calendar": "googlecalendar",
-                "outlook": "outlook",
-                "microsoft_teams": "microsoft_teams",
-                "notion": "notion",
-                "discord": "discord",
-            }
-            _TOOLKIT_TO_PROVIDER = {v: k for k, v in _PROVIDER_TO_TOOLKIT.items()}
-            _all_toolkits = list(_PROVIDER_TO_TOOLKIT.values())
-
-            # ── MCP helper ────────────────────────────────────────
-            def _mcp_call(tool_name: str, arguments: dict) -> dict:
-                """Call a Composio MCP tool and return parsed result."""
-                _req = urllib.request.Request(
-                    "https://connect.composio.dev/mcp",
-                    headers={
-                        "Authorization": f"Bearer {_access_token}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                    },
-                    data=json.dumps({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {
-                            "name": tool_name,
-                            "arguments": arguments,
-                        },
-                    }).encode(),
-                )
-                with urllib.request.urlopen(_req, timeout=30) as _resp:
-                    _raw = _resp.read().decode()
-                _data_lines = _re.findall(
-                    r"^data:\s*(.+)$", _raw, _re.MULTILINE
-                )
-                for _dl in _data_lines:
-                    try:
-                        _parsed = json.loads(_dl)
-                        _content = _parsed.get("result", {}).get("content", [])
-                        for _c in _content:
-                            _text = _c.get("text", "")
-                            try:
-                                return json.loads(_text)
-                            except json.JSONDecodeError:
-                                return {"error": _text}
-                        break
-                    except json.JSONDecodeError:
-                        pass
-                return {"error": "no data in response"}
-
-            # ── 4. Query connected accounts ───────────────────────
-            _disc_result = _mcp_call(
-                "COMPOSIO_MANAGE_CONNECTIONS",
-                {"toolkits": _all_toolkits, "action": "list"},
-            )
-            _disc_data = _disc_result.get("data", {})
-            _disc_results = _disc_data.get("results", {})
-
-            # ── 5. Lightweight read tools per provider ────────────
-            _PROVIDER_TOOLS: dict[str, tuple[str, dict]] = {
-                "gmail": (
-                    "GMAIL_FETCH_EMAILS",
-                    {"max_results": 5, "q": "is:unread"},
-                ),
-                "github": (
-                    "GITHUB_GET_THE_AUTHENTICATED_USER",
-                    {},
-                ),
-                "slack": (
-                    "SLACK_LIST_CHANNELS",
-                    {},
-                ),
-                "google_calendar": (
-                    "GOOGLECALENDAR_LIST_CALENDARS",
-                    {},
-                ),
-                "notion": (
-                    "NOTION_LIST_USERS",
-                    {},
-                ),
-                "discord": (
-                    "DISCORD_LIST_GUILDS",
-                    {},
-                ),
-                "outlook": (
-                    "OUTLOOK_LIST_MESSAGES",
-                    {"max_results": 5},
-                ),
-                "microsoft_teams": (
-                    "MICROSOFT_TEAMS_LIST_CHANNELS",
-                    {},
-                ),
-            }
-
+            # ── 3. For each connected credential, trigger sync ──────
             results: list[dict] = []
-            for _toolkit, _info in _disc_results.items():
-                _provider = _TOOLKIT_TO_PROVIDER.get(_toolkit)
+            for _cred in _creds:
+                _n8n_type = _cred.get("type", "")
+                _provider = _N8N_TYPE_TO_PROVIDER.get(_n8n_type)
                 if not _provider:
                     continue
 
-                # Only process active connections
-                _active = [
-                    a for a in _info.get("accounts", [])
-                    if a.get("status") == "active"
-                ]
-                if not _active:
-                    continue
-
-                _tool_spec = _PROVIDER_TOOLS.get(_provider)
-                if not _tool_spec:
-                    continue
-
-                _tool_slug, _tool_args = _tool_spec
+                _cred_id = _cred.get("id")
+                _cred_name = _cred.get("name", _provider)
                 _conn_id = f"{_provider}-primary"
 
                 try:
-                    _exec_result = _mcp_call(
-                        "COMPOSIO_MULTI_EXECUTE_TOOL",
-                        {
-                            "tools": [
-                                {
-                                    "tool_slug": _tool_slug,
-                                    "arguments": _tool_args,
-                                }
-                            ]
-                        },
-                    )
+                    # Run the adapter's sync() to canonicalize status
+                    _adapter = _import_adapter(_provider)
+                    if _adapter:
+                        _sync_result = _adapter.sync({})
+                        _synced = 0
+                        _ingested = 0
+                        _status = _sync_result.status
 
-                    _exec_data = _exec_result.get("data", {})
-                    _exec_items = _exec_data.get("results", [])
-                    _success = _exec_data.get("success_count", 0)
-
-                    if _success > 0 and _exec_items:
-                        _raw_response = _exec_items[0].get("response", {})
-                        _raw_data = _raw_response.get("data", {})
-
-                        # Canonicalize: build markdown from raw provider data
-                        _content = _canonicalize_provider_data(
-                            _provider, _raw_data
-                        )
-                        _record = {
-                            "content": _content,
-                            "metadata": {
+                        # Ingest any records the adapter returned
+                        for _rec in _sync_result.records:
+                            _record = {
+                                "content": _rec.content,
+                                "metadata": {
+                                    "provider": _provider,
+                                    "credential": _cred_name,
+                                    "source": "n8n-onboarding",
+                                },
                                 "provider": _provider,
-                                "tool": _tool_slug,
-                                "source": "mcp-onboarding",
-                            },
-                            "provider": _provider,
-                        }
+                            }
+                            _conn = {"id": _conn_id, "provider": _provider}
+                            try:
+                                _ir = ingest_into_codex_stream(_record, _conn)
+                                _synced += 1
+                                _ingested += _ir.chunks_written
+                            except Exception:
+                                pass
 
-                        _conn = {
-                            "id": _conn_id,
-                            "provider": _provider,
-                        }
-                        _ir = ingest_into_codex_stream(_record, _conn)
                         results.append({
                             "provider": _provider,
-                            "synced": 1,
-                            "ingested": _ir.chunks_written,
-                            "status": "ok",
+                            "credential": _cred_name,
+                            "synced": _synced,
+                            "ingested": _ingested,
+                            "status": _status,
                         })
                     else:
                         results.append({
                             "provider": _provider,
+                            "credential": _cred_name,
                             "synced": 0,
                             "ingested": 0,
-                            "status": "empty",
+                            "status": "ok",
                         })
                 except Exception as _exc:
                     results.append({
                         "provider": _provider,
+                        "credential": _cred_name,
                         "synced": 0,
                         "ingested": 0,
                         "status": "error",
                         "error": str(_exc)[:200],
                     })
 
-            # ── 6. Write PROFILE.md summary ───────────────────────
+            # ── 4. Write PROFILE.md summary ─────────────────────────
             _write_profile_summary(results)
 
             _context_gathering_state = {
@@ -1748,11 +1679,31 @@ def start_context_gathering() -> dict:
                 "traceback": _tb.format_exc(),
             }
 
-    import threading
-
     threading.Thread(target=_run_pipeline, daemon=True).start()
 
     return {"status": "running", "error": None}
+
+
+def _get_gathering_logger():
+    """Get or create a logger for context gathering."""
+    _log = logging.getLogger("pantheon.context_gathering")
+    if not _log.handlers:
+        _log.addHandler(logging.StreamHandler())
+    return _log
+
+
+def _import_adapter(provider: str):
+    """Try to import and instantiate a cron sync adapter for the provider."""
+    try:
+        _adapter_root = str(
+            Path.home() / "pantheon" / "cron" / "pantheon-sync"
+        )
+        if _adapter_root not in sys.path:
+            sys.path.insert(0, _adapter_root)
+        from adapters import get_adapter
+        return get_adapter(provider)
+    except Exception:
+        return None
 
 
 def get_context_gathering_status() -> dict:
@@ -1777,6 +1728,7 @@ def _write_profile_summary(results: list[dict]) -> None:
     ]
 
     _connected = [r for r in results if r.get("synced", 0) > 0]
+    _available = [r for r in results if r.get("status") in ("ok", "not_connected")]
     _errors = [r for r in results if r.get("status") == "error"]
 
     if _connected:
@@ -1787,6 +1739,14 @@ def _write_profile_summary(results: list[dict]) -> None:
                 f"{_r['ingested']} chunks ingested\n"
             )
 
+    if _available and not _connected:
+        _lines.append("\n## Available Providers\n")
+        for _r in _available:
+            _lines.append(
+                f"- **{_r.get('credential', _r['provider'])}**: "
+                f"Credential connected in n8n\n"
+            )
+
     if _errors:
         _lines.append("\n## Errors\n")
         for _r in _errors:
@@ -1794,93 +1754,12 @@ def _write_profile_summary(results: list[dict]) -> None:
                 f"- **{_r['provider']}**: {_r.get('error', 'unknown')}\n"
             )
 
-    if not _connected and not _errors:
+    if not results:
         _lines.append(
-            "\n*No connected providers found. "
+            "\n*No n8n credentials found. "
             "Connect integrations from Settings → Integrations.*\n"
         )
 
     (_athenaeum / "PROFILE.md").write_text("".join(_lines))
-    logger.info("Wrote PROFILE.md after context gathering (%d providers)", len(results))
+    _get_gathering_logger().info("Wrote PROFILE.md after context gathering (%d providers)", len(results))
 
-
-def _canonicalize_provider_data(provider: str, raw_data: dict) -> str:
-    """Convert raw provider API response to structured markdown.
-
-    Each provider gets a lightweight canonical form suitable for
-    the Codex-Stream ingestion pipeline.
-    """
-    if provider == "github":
-        _login = raw_data.get("login", "unknown")
-        _name = raw_data.get("name") or _login
-        _bio = raw_data.get("bio") or "(no bio)"
-        _repos = raw_data.get("public_repos", 0)
-        _company = raw_data.get("company") or "N/A"
-        return (
-            f"# GitHub Profile\n\n"
-            f"**Username:** {_login}\n"
-            f"**Name:** {_name}\n"
-            f"**Bio:** {_bio}\n"
-            f"**Company:** {_company}\n"
-            f"**Public Repos:** {_repos}\n"
-        )
-
-    if provider == "gmail":
-        _messages = raw_data if isinstance(raw_data, list) else raw_data.get("messages", [])
-        if not _messages:
-            return "# Gmail\n\n*No recent unread emails.*\n"
-        _lines = ["# Gmail — Recent Unread\n"]
-        for _msg in _messages[:5]:
-            _subj = _msg.get("subject", "(no subject)")
-            _from = _msg.get("from", _msg.get("sender", "unknown"))
-            _snippet = (_msg.get("snippet") or _msg.get("body") or "")[:200]
-            _lines.append(f"\n## {_subj}\n\n**From:** {_from}\n\n{_snippet}\n")
-        return "".join(_lines)
-
-    if provider == "slack":
-        _channels = raw_data if isinstance(raw_data, list) else raw_data.get("channels", [])
-        if not _channels:
-            return "# Slack\n\n*No channels found.*\n"
-        _lines = ["# Slack — Channels\n"]
-        for _ch in _channels[:10]:
-            _name = _ch.get("name", _ch.get("channel_name", "?"))
-            _topic = _ch.get("topic", {}).get("value", "") if isinstance(_ch.get("topic"), dict) else ""
-            _lines.append(f"- **#{_name}** {_topic}\n")
-        return "".join(_lines)
-
-    if provider == "google_calendar":
-        _calendars = raw_data if isinstance(raw_data, list) else raw_data.get("items", [])
-        if not _calendars:
-            return "# Google Calendar\n\n*No calendars found.*\n"
-        _lines = ["# Google Calendar\n"]
-        for _cal in _calendars[:5]:
-            _summary = _cal.get("summary", "(unnamed)")
-            _lines.append(f"- {_summary}\n")
-        return "".join(_lines)
-
-    if provider == "notion":
-        _users = raw_data if isinstance(raw_data, list) else raw_data.get("results", [])
-        if not _users:
-            return "# Notion\n\n*No users found.*\n"
-        _lines = ["# Notion — Users\n"]
-        for _u in _users[:5]:
-            _name = _u.get("name", "?")
-            _type = _u.get("type", "?")
-            _lines.append(f"- **{_name}** ({_type})\n")
-        return "".join(_lines)
-
-    if provider == "discord":
-        _guilds = raw_data if isinstance(raw_data, list) else []
-        if not _guilds:
-            return "# Discord\n\n*No guilds found.*\n"
-        _lines = ["# Discord — Guilds\n"]
-        for _g in _guilds[:10]:
-            _name = _g.get("name", "?")
-            _lines.append(f"- {_name}\n")
-        return "".join(_lines)
-
-    # Generic: dump as JSON for unknown providers
-    return (
-        f"# {provider.replace('_', ' ').title()}\n\n"
-        f"```json\n{json.dumps(raw_data, indent=2, default=str)[:3000]}\n```\n"
-    )
