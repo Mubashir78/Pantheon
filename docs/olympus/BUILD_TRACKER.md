@@ -1196,24 +1196,116 @@ GIT:
 
 ---
 
+---
+
+## Stream D: n8n Migration (2026-05-29)
+
+> **Decision:** Composio broken — 2/8 active connections, 6 silently dropped by API. n8n self-hosted Docker verified: 449 credential types, one-click OAuth, REST API, MCP server at `localhost:5678/mcp-server/http`. Full plan: `~/pantheon/docs/olympus/n8n-migration-plan.md`
+
+### Composio Post-Mortem (2026-05-29)
+Gmail ✅ / GitHub ✅ actually connected. Google Calendar ❌, Google Drive ❌, Notion ❌ — user connected in UI, API reports zero accounts. Slack ❌, Discord ❌, Outlook ❌ — never connected. Root cause: Composio silently drops OAuth connections.
+
+---
+
+### N1 — Sidebar Reorder + Settings Move
+
+| Field | Value |
+|---|---|
+| **Status** | ✅ |
+| **Priority** | P0 — unblocks admin access |
+| **Depends on** | Nothing |
+| **Files** | `src/components/shell/Sidebar.tsx` |
+| **Commit** | `554743c` |
+
+Admin shield → bottom of collapsed rail (where Settings is). Settings gear → beside Profile avatar. Remove Settings text label in expanded drawer. One file change.
+
+### N2 — n8n Feature Toggle + Sidebar Icon
+
+| Field | Value |
+|---|---|
+| **Status** | ✅ |
+| **Priority** | P0 — enables n8n visibility |
+| **Depends on** | N1 |
+| **Files** | `feature-flag-store.ts`, `AdminPanel.tsx`, `Sidebar.tsx`, `AdminPanel.test.tsx`, `feature-flag-store.test.ts` |
+| **Commit** | `cbdff27` |
+
+Add `n8n` toggle (default OFF) to feature flag system. Workflow icon in rail between Athenaeum and Stream. Hidden when toggle OFF. 5 file locations per feature-flag pattern.
+
+### N3 — n8n API Client + Olympus Routes
+
+| Field | Value |
+|---|---|
+| **Status** | ✅ |
+| **Priority** | P0 — backend for onboarding |
+| **Commit** | `fb753d3` |
+| **Depends on** | n8n Docker running |
+| **Files** | `~/pantheon/webui/api/n8n_client.py`, `routes.py`, `olympus_users.py`, `.env` |
+
+Python wrapper for n8n REST API (363 lines). 5 endpoints verified: `GET /api/n8n/status`, `GET /api/n8n/credentials`, `GET /api/n8n/credentials/{provider}`, `POST /api/n8n/credentials/{provider}/connect`. BYOK-aware with .env fallback loader. n8n feature flag in backend. n8n Docker `unless-stopped` policy configured.
+
+### N4 — Onboarding + Settings Integration
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 — replaces Composio in user flow |
+| **Depends on** | N3 |
+| **Files** | `integrations.lazy.tsx`, `ConnectionManager.tsx`, `useOAuth.ts` |
+
+Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab. Same UI (brand icons, cards, Skip button), different backend. Flow: Connect → n8n OAuth URL → user authorizes → poll status → ✅.
+
+### N5 — MCP Server + Core Workflows
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 — enables Hermes agent tools |
+| **Depends on** | N3 |
+| **Files** | `~/.hermes/mcp-servers/n8n.yaml`, n8n workflows (via UI) |
+
+Register n8n MCP at `/mcp-server/http`. Core workflows as agent tools: `github_profile`, `gmail_search`, `calendar_today`, `notion_search`, `drive_search`. Replace `sync_scheduler.py` with n8n Schedule Trigger workflow.
+
+### N6 — Composio Deprecation
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P2 — cleanup |
+| **Depends on** | N4, N5 |
+| **Files** | Archive `composio-setup.md`, remove `.env` key, remove sync cron |
+
+Cleanup after migration verified. Keep Codex-Stream pipeline + wiki plugins.
+
+---
+
 ## Current Status Summary
 
-> Updated: 2026-05-28 — Cross-referenced git log + source files + live app
+> Updated: 2026-05-29 — Composio audit: 2/8 active. Stream D added (n8n migration, 6 tasks). n8n v2.22.5 verified with MCP server enabled.
 
 | Stream / Tier | Tasks | Status |
 |---------------|-------|--------|
-| **Pre-Build** (I1, I2) | 2/2 | ✅ Complete |
+| **Pre-Build** (I1) | 1/1 | ✅ Complete |
+| **Pre-Build** (I2 — Composio) | Archived | ➖ Superseded by N1-N6 |
 | **Tier 0** (Foundation) | 0.1–0.5 | ✅ Complete |
 | **Tier 0.5** (Cleanup) | T0.5 | ✅ Complete |
 | **Stream A** (T1–T7) | 7/7 | ✅ Complete |
-| **Stream B** (T8–T13) | 6/6 | ✅ Complete |
-| **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete |
+| **Stream B** (T8–T13) | 6/6 | ✅ Complete (superseded by N5) |
+| **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete (T14 superseded by N4) |
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
+| **Stream D — n8n Migration** (N1–N6) | 3/6 | 🔄 In progress |
 | **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
-| **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started |
+| **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started (n8n-native) |
 
-**Build complete: 30/31 tasks (97%)**
+**Build complete: 33/37 tasks (89%) — 3 n8n tasks + 4 Tier 6 remaining**
+
+### Reconciliation Notes (2026-05-29)
+- **Composio audit:** `COMPOSIO_MANAGE_CONNECTIONS` confirmed 2/8 active (Gmail, GitHub). 6 providers initiated but zero accounts. User confirmed Notion, Drive, Calendar were connected in UI but dropped.
+- **I2 (Composio research):** Archived — superseded by n8n spike and migration plan.
+- **T11-T12 (sync + adapters):** Still functional Python but superseded by n8n workflows (N5).
+- **T14 (OAuth UI):** Same component structure, different backend (n8n API instead of Composio) — N4.
+- **Stream D added:** 6 tasks (N1–N6). N1-N2 immediate (sidebar). N3-N4 core migration. N5-N6 polish.
+- **n8n spike:** Docker v2.22.5 at `localhost:5678`, MCP enabled at `/mcp-server/http`, API key with 68 scopes, 449 credential types verified.
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.
