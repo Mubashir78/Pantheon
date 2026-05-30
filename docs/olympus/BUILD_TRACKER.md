@@ -1485,7 +1485,7 @@ Each concern gets one owner:
 
 ## Current Status Summary
 
-> Updated: 2026-05-30 — N6 complete (all subtasks). Phase 1: 37/38 tasks (97%). N6e rewrote context gathering pipeline. 2 composio refs remain (expected: BUILD_TRACKER task def + migration plan docs).
+|> Updated: 2026-05-30 — 🚀 Olympus UI deployed on 8787. Legacy Pantheon UI sunset. |
 
 | Stream / Tier | Tasks | Status |
 |---------------|-------|--------|
