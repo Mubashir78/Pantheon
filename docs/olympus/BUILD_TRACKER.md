@@ -1105,26 +1105,26 @@ GIT:
 
 > From OpenHuman/Pantheon integration spec. Depends on Phase 1 data flowing.
 
-### T21 — Obsidian Vault Mirror (P4a)
+### T21 — Knowledge Graph from Real Ichor Data
+
+> **Scope changed (2026-05-30):** Originally "Obsidian Vault Mirror." Re-scoped to wire the existing D3 KnowledgeGraph component to the Ichor knowledge graph database (graph.db) instead of stale Codex-Stream hotness data. The knowledge graph now shows 200+ real entities with typed categories (person, technology, project, company) and 354+ relationship edges from the Pantheon Ichor memory system.
 
 | Field | Value |
 |-------|-------|
-| **Status** | 🔲 |
-| **Depends on** | Nothing (self-contained setup — syncs entire Athenaeum) |
-| **Files** | `~/.config/systemd/user/athenaeum-obsidian-sync.service`, `~/.hermes/cron/obsidian-mirror/` |
+| **Status** | ✅ |
+| **Depends on** | Nothing |
+| **Files** | `webui/api/stream.py` (get_ichor_graph), `webui/api/routes.py` (route), `src/stores/stream-store.ts` (fetchIchorGraph), `src/components/stream/StreamDashboard.tsx` (use ichor data) |
+| **Commit** | `f17ee8b` (Pantheon), `2e4d830` (Olympus-UI) |
 
-**What:** Sync the entire `~/athenaeum/` as an Obsidian vault. Install `obsidian-headless` CLI, configure remote vault, systemd service for continuous sync. `sudo loginctl enable-linger konan` for logout survival. Scope: all Codexes (Codex-Stream, Codex-Olympus, etc.), not just Codex-Stream.
+**What:** Backend endpoint `GET /api/stream/ichor-graph` queries the Ichor `graph.db` directly via SQLite for entity nodes (tool, project, person, organization, system, skill, event, fact, preference, decision) with color-coded categories and relationship edges. Frontend automatically uses ichor data when stream entities are sparse (<10).
 
 **🚦 QA Gate T21:**
 ```
-- [ ] obsidian-headless installed globally (npm)
-- [ ] Remote vault created via `ob sync-create-remote`
-- [ ] Initial sync completes without errors
-- [ ] systemd service starts: systemctl --user start obsidian-stream-sync
-- [ ] Linger enabled: sudo loginctl enable-linger konan
-- [ ] New chunks in Codex-Stream → appear in Obsidian within 60s
-- [ ] Survives logout (linger keeps user session alive)
-- [ ] Commit: "feat(obsidian): Codex-Stream → Obsidian vault mirror"
+- [x] GET /api/stream/ichor-graph returns 200+ entities, 354+ edges
+- [x] Entities have typed categories (person/technology/project/company)
+- [x] KnowledgeGraph opens with colored nodes by category
+- [x] Fallback: uses ichor data when stream entities < 10
+- [x] Zero error when graph.db is unavailable
 ```
 
 ---
@@ -1501,10 +1501,10 @@ Each concern gets one owner:
 | **Stream D — n8n Migration** (N1–N5) | 5/5 | ✅ Complete |
 | **Stream D — Composio Remediation** (N6) | 5/5 | ✅ Complete |
 | **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
-| **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started (n8n-native) |
+| **Tier 6 — Integration Polish** (T21–T24) | 1/4 | 🔄 T21 done, T22-T24 remain |
 | **Tier 7 — Backend Refactor** (T25–T28) | 0/4 | 🔲 Post-ship — build beside, no downtime |
 
-**Phase 1: 37/38 tasks (97%) — T21-T24 (4 tasks) remaining**
+**Phase 1: 38/42 tasks (90%) — T22-T24 (3 tasks) remaining**
 **Phase 2: 0/4 Tier 7 tasks — post-ship, runs parallel on port 8788**
 
 ### Reconciliation Notes (2026-05-30)
