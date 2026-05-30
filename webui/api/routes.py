@@ -3340,6 +3340,41 @@ a:hover{{text-decoration:underline}}
             bad(handler, str(exc), status=400)
         return True
 
+    # ── Olympus user API (public routes) ────────────────────────────
+    if parsed.path == "/api/users":
+        from api.olympus_users import list_users
+
+        j(handler, {"users": list_users()})
+        return True
+
+    if parsed.path == "/api/auth/me":
+        from api.olympus_users import build_bootstrap
+        from api.auth import parse_cookie, verify_session
+        from api.config import HOST
+
+        session_val = None
+        cookie_val = parse_cookie(handler)
+        if cookie_val and verify_session(cookie_val):
+            session_val = cookie_val
+        auth_header = handler.headers.get("Authorization", "")
+        if not session_val and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if verify_session(token):
+                session_val = token
+
+        if session_val:
+            from api.olympus_users import get_session_user, get_user
+
+            token_part = session_val.split(".")[0] if "." in session_val else session_val
+            uid = get_session_user(token_part)
+            if uid:
+                user = get_user(uid)
+                if user:
+                    j(handler, build_bootstrap(user))
+                    return True
+        j(handler, {"error": "Authentication required"}, status=401)
+        return True
+
     # ── Theme endpoint ──────────────────────────────────────────
     if parsed.path == "/api/theme":
         import yaml as _yaml
@@ -4834,6 +4869,32 @@ def handle_post(handler, parsed) -> bool:
             j(handler, {"ok": True})
         except Exception as exc:
             bad(handler, str(exc), status=500)
+        return True
+
+    # ── Auth login ─────────────────────────────────────────────
+    if parsed.path == "/api/auth/login":
+        # Already handled by the legacy auth endpoints below (~line 6932)
+        # This is a no-op — the existing handler uses the `body` var
+        # already read by handle_post's preamble at line 4725.
+        # Fall through to let the legacy handler process it first.
+        pass
+
+    # ── Auth logout ────────────────────────────────────────────
+
+    # ── Auth logout ────────────────────────────────────────────
+    if parsed.path == "/api/auth/logout":
+        from api.auth import parse_cookie, invalidate_session
+
+        cookie_val = parse_cookie(handler)
+        if cookie_val:
+            invalidate_session(cookie_val)
+        auth_header = handler.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            from api.auth import verify_session, invalidate_session
+            if verify_session(token):
+                invalidate_session(token)
+        j(handler, {"ok": True})
         return True
 
     # ── Olympus routes — proxy to Olympus backend service (:8788) ──
@@ -6850,8 +6911,6 @@ def handle_post(handler, parsed) -> bool:
         )
         from api.auth import _check_login_rate, _record_login_attempt
 
-        if not is_auth_enabled():
-            return j(handler, {"ok": True, "message": "Auth not enabled"})
         client_ip = handler.client_address[0]
         if not _check_login_rate(client_ip):
             return j(
@@ -6859,18 +6918,52 @@ def handle_post(handler, parsed) -> bool:
                 {"error": "Too many attempts. Try again in a minute."},
                 status=429,
             )
+
+        # Try multi-user auth (Olympus) first
+        from api.olympus_users import list_users as _olympus_list_users, _get_data as _olympus_get_data
+        multi_user_active = bool(_olympus_get_data().get("users", []))
+
+        if multi_user_active:
+            from api.olympus_users import authenticate as _olympus_auth
+            from api.olympus_users import build_bootstrap as _olympus_bootstrap
+            from api.olympus_users import associate_session as _olympus_assoc
+
+            username = body.get("username", "")
+            password = body.get("password", "")
+            user = _olympus_auth(username, password) if username else None
+            if not user:
+                _record_login_attempt(client_ip)
+                return bad(handler, "Invalid credentials", 401)
+
+            session_token = create_session()
+            token_part = session_token  # Full "token.sig" format needed for verify_session
+            _olympus_assoc(session_token.split(".")[0], user["id"])
+            user_data = _olympus_bootstrap(user)
+            j(handler, {
+                "token": token_part,
+                "user": user_data.get("user", user) if isinstance(user_data, dict) else user,
+            })
+            return True
+
+        # Legacy single-password auth
+        if not is_auth_enabled():
+            return j(handler, {"ok": True, "message": "Auth not enabled"})
         password = body.get("password", "")
         if not verify_password(password):
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         cookie_val = create_session()
+        token_part = cookie_val.split(".")[0]
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(json.dumps({
+            "ok": True,
+            "token": token_part,
+        }).encode())
         return True
 
     if parsed.path == "/api/auth/logout":
