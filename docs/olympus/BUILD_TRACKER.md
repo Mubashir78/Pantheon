@@ -1289,7 +1289,7 @@ Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab
 
 | Field | Value |
 |---|---|
-| **Status** | 🔄 In progress (N6a+N6b+N6c ✅ — N6d+N6e 🔲) |
+| **Status** | ✅ Complete |
 | **Priority** | P2 — repo must be COMPLETELY clean of composio |
 | **Depends on** | N4, N5 |
 
@@ -1485,7 +1485,7 @@ Each concern gets one owner:
 
 ## Current Status Summary
 
-> Updated: 2026-05-30 — N6c complete (cron adapters rewritten to n8n). N6d+N6e remain. Phase 1: 33/38 tasks (87%).
+> Updated: 2026-05-30 — N6 complete (all subtasks). Phase 1: 37/38 tasks (97%). N6e rewrote context gathering pipeline. 2 composio refs remain (expected: BUILD_TRACKER task def + migration plan docs).
 
 | Stream / Tier | Tasks | Status |
 |---------------|-------|--------|
@@ -1499,19 +1499,19 @@ Each concern gets one owner:
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
 | **Stream D — n8n Migration** (N1–N5) | 5/5 | ✅ Complete |
-| **Stream D — Composio Remediation** (N6a–N6e) | 3/5 | 🔄 N6a+N6b+N6c done, N6d+N6e remain |
+| **Stream D — Composio Remediation** (N6) | 5/5 | ✅ Complete |
 | **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started (n8n-native) |
 | **Tier 7 — Backend Refactor** (T25–T28) | 0/4 | 🔲 Post-ship — build beside, no downtime |
 
-**Phase 1: 33/38 tasks (87%) — N6d+N6e (2 subtasks) + T21-T24 (4 tasks) remaining**
+**Phase 1: 37/38 tasks (97%) — T21-T24 (4 tasks) remaining**
 **Phase 2: 0/4 Tier 7 tasks — post-ship, runs parallel on port 8788**
 
 ### Reconciliation Notes (2026-05-30)
-- **N6c complete:** Commit `5d57fd2`. Rewrote 8 cron adapters + base.py + connections.json + test_adapters.py. Replaced composio SDK calls with n8n REST API credential checks. 11/11 tests pass.
-- **N6a+N6b complete:** Commit `219d84b`. Deleted bundles/composio-mcp/, stripped onboarding.py + routes.py, updated all docs/planning files, removed composio skill reference.
-- **N6e scope refined:** Still need to rewrite `start_context_gathering()` in onboarding.py (uses composio MCP token + COMPOSIO_MANAGE_CONNECTIONS) to use n8n instead.
-- **Build count:** 36/37 → 33/38. N6 expanded from 1 task → 5 subtasks.
+- **N6 fully complete:** All 5 subtasks done across 4 commits. 26 tracked files with composio refs → 2 expected docs.
+- **N6e (final):** Commit `64d405f`. Rewrote `start_context_gathering()` from composio MCP → n8n REST API. Rebuilt static assets from Olympus-UI source (zero composio in new bundles). Removed 3 stale JS bundles. Final count: 2 files — BUILD_TRACKER (task definition) and n8n-migration-plan (migration context). Both expected.
+- **Cron adapters:** 8 adapters now check n8n credential status via REST API. 11/11 tests pass. Actual data sync deferred to n8n workflows.
+- **Build count history:** 36/37 → 33/38 → 37/38. N6 expanded from 1→5, now complete.
 
 ### Reconciliation Notes (2026-05-28)
 - **T19 (Kanban):** Tracker said 🔲 but KanbanPanel.tsx exists at 929 lines, committed `d0264cb`. Fixed → ✅.
