@@ -66,6 +66,7 @@ DEFAULT_FEATURE_FLAGS: dict[str, dict[str, bool]] = {
     "plugins_panel": {"owner": True, "admin": False, "power_user": False, "user": False, "guest": False},
     "mcp_panel": {"owner": True, "admin": False, "power_user": False, "user": False, "guest": False},
     "user_management": {"owner": True, "admin": True, "power_user": False, "user": False, "guest": False},
+    "n8n": {"owner": True, "admin": True, "power_user": False, "user": False, "guest": False},
 }
 
 
