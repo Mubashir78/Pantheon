@@ -1,0 +1,1 @@
+import{lt as e}from"./index-2Fn0IQx-.js";import{t}from"./StreamDashboard-xIwWvwmQ.js";var n=e();function r(){return(0,n.jsx)(t,{})}export{r as Component};

@@ -418,9 +418,32 @@ class _Embedder:
         try:
             import httpx
             resp = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
-            return resp.status_code == 200
+            if resp.status_code == 200:
+                return True
         except Exception:
-            return False
+            pass
+        # Ollama might be wedged — try restarting once before giving up
+        try:
+            import subprocess, time
+            logger = logging.getLogger("ichor_hybrid")
+            logger.warning("Ollama not responding — attempting restart...")
+            subprocess.run(["systemctl", "--user", "restart", "ollama"], timeout=30, capture_output=True)
+            time.sleep(5)
+            import httpx
+            for attempt in range(6):
+                try:
+                    resp = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
+                    if resp.status_code == 200:
+                        logger.info("Ollama restarted successfully")
+                        return True
+                except Exception:
+                    pass
+                time.sleep(3)
+            logger.warning("Ollama restart failed: still not responding")
+        except Exception as e:
+            logger = logging.getLogger("ichor_hybrid")
+            logger.warning("Ollama restart attempt failed: %s", e)
+        return False
 
 
 # ===================================================================

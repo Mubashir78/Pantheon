@@ -37,3 +37,31 @@ mcp_servers:
   pantheon:
     url: "http://127.0.0.1:8010/mcp"
     timeout: 60
+  pantheon-web-tools:
+    transport: stdio
+    command: /home/$USER/.hermes/hermes-agent/venv/bin/python3
+    args:
+    - /home/$USER/.hermes/scripts/pantheon-web-tools.py
+    timeout: 60
+  github:
+    transport: stdio
+    command: npx
+    args:
+    - '@modelcontextprotocol/server-github'
+    enabled: true
+    env:
+      GITHUB_TOKEN: "ghp_placeholder"
+  composio:
+    url: https://connect.composio.dev/mcp
+    timeout: 180
+    headers:
+      Authorization: "Bearer your_composio_oauth_token"
+      x-consumer-api-key: "ck_4_a3xj4nUm0DCd-hJUnk"
+  playwright:
+    transport: stdio
+    command: npx
+    args:
+    - '@playwright/mcp@latest'
+    - --cdp-endpoint
+    - http://localhost:9222
+    enabled: true

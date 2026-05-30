@@ -1287,12 +1287,12 @@ Replace Composio with n8n in onboarding Step 4 and Settings → Integrations tab
 
 | Field | Value |
 |---|---|
-| **Status** | 🔲 |
+| **Status** | ✅ |
 | **Priority** | P2 — cleanup |
 | **Depends on** | N4, N5 |
-| **Files** | Archive `composio-setup.md`, remove `.env` key, remove sync cron |
+| **Files** | Archived `composio-setup.md`, removed COMPOSIO env keys, removed composio MCP server, removed sync cron symlink |
 
-Cleanup after migration verified. Keep Codex-Stream pipeline + wiki plugins.
+Cleanup after migration verified. Keep Codex-Stream pipeline + wiki plugins. Composio `bundles/composio-mcp/` still on disk for reference.
 
 ---
 
@@ -1432,12 +1432,12 @@ Each concern gets one owner:
 | **Stream C — Pre-Wizard** (T14–T14b, T15a–T15d) | 6/6 | ✅ Complete (T14 superseded by N4) |
 | **Stream C — Onboarding** (T15) | 1/1 | ✅ Complete |
 | **Stream C — Remaining** (T16–T17) | 2/2 | ✅ Complete |
-| **Stream D — n8n Migration** (N1–N6) | 5/6 | 🔄 In progress |
+| **Stream D — n8n Migration** (N1–N6) | 6/6 | ✅ Complete |
 | **Tier 5 — Polish** (T18–T20) | 3/3 | ✅ Complete |
 | **Tier 6 — Integration Polish** (T21–T24) | 0/4 | 🔲 Not started (n8n-native) |
 | **Tier 7 — Backend Refactor** (T25–T28) | 0/4 | 🔲 Post-ship — build beside, no downtime |
 
-**Phase 1: 35/37 tasks (95%) — 1 n8n task + 4 Tier 6 remaining**
+**Phase 1: 36/37 tasks (97%) — 4 Tier 6 remaining**
 **Phase 2: 0/4 Tier 7 tasks — post-ship, runs parallel on port 8788**
 
 ### Reconciliation Notes (2026-05-29)

@@ -1,5 +1,5 @@
 {
-  "_note": "Active Pantheon sync connections. Each uses a 'provider' key that maps to a registered adapter.",
+  "_note": "Active Pantheon sync connections. Each uses a 'provider' key that maps to a registered adapter. composio_account_id is populated by the onboarding pipeline or the sync scheduler on first successful connection detection.",
   "connections": [
     {
       "id": "gmail-primary",
@@ -7,7 +7,7 @@
       "enabled": false,
       "sync_interval_minutes": 20,
       "daily_budget": 500,
-      "_note": "Enable after T14 OAuth wiring. Requires Composio BYOK credentials."
+      "composio_account_id": null
     },
     {
       "id": "github-primary",
@@ -15,7 +15,7 @@
       "enabled": false,
       "sync_interval_minutes": 20,
       "daily_budget": 500,
-      "_note": "Enable after T14 OAuth wiring."
+      "composio_account_id": null
     },
     {
       "id": "slack-primary",
@@ -23,7 +23,47 @@
       "enabled": false,
       "sync_interval_minutes": 20,
       "daily_budget": 500,
-      "_note": "Enable after T14 OAuth wiring."
+      "composio_account_id": null
+    },
+    {
+      "id": "google-calendar-primary",
+      "provider": "google_calendar",
+      "enabled": false,
+      "sync_interval_minutes": 20,
+      "daily_budget": 200,
+      "composio_account_id": null
+    },
+    {
+      "id": "outlook-primary",
+      "provider": "outlook",
+      "enabled": false,
+      "sync_interval_minutes": 20,
+      "daily_budget": 500,
+      "composio_account_id": null
+    },
+    {
+      "id": "microsoft-teams-primary",
+      "provider": "microsoft_teams",
+      "enabled": false,
+      "sync_interval_minutes": 20,
+      "daily_budget": 500,
+      "composio_account_id": null
+    },
+    {
+      "id": "notion-primary",
+      "provider": "notion",
+      "enabled": false,
+      "sync_interval_minutes": 20,
+      "daily_budget": 300,
+      "composio_account_id": null
+    },
+    {
+      "id": "discord-primary",
+      "provider": "discord",
+      "enabled": false,
+      "sync_interval_minutes": 20,
+      "daily_budget": 300,
+      "composio_account_id": null
     }
   ]
 }

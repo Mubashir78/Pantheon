@@ -1,133 +1,134 @@
 #!/usr/bin/env python3
-"""Collect morning briefing data for Hermes cron job.
-Now outputs condensed Hades summary instead of the full report."""
-import subprocess, sys
-import re
+"""
+Pantheon Morning Briefing — portable data collector.
+
+Collects system state for the Hermes cron agent to compose into a
+daily briefing.  Uses environment variables for all paths so it works
+on any machine without modification.
+
+Environment variables (all optional):
+  PANTHEON_DIR       — root of Pantheon checkout       (default: $HOME/pantheon)
+  ATHENAEUM_DIR      — root of Athenaeum               (default: $HOME/athenaeum)
+  HERMES_HOME        — Hermes config root               (default: $HOME/.hermes)
+  PROJECT_IDEAS_FILE — path to project-ideas.md         (default: PANTHEON_DIR/project-ideas.md)
+  UTC_OFFSET         — hours from UTC for local time    (default: -6 / America/Denver)
+
+See examples/morning-briefing/ for setup docs.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone, timedelta, date
 
-today = date.today().isoformat()
-now_utc = datetime.now(timezone.utc)
-now_mdt = now_utc + timedelta(hours=-6)
-
-print(f"=== TIMESTAMP ===")
-print(f"UTC:  {now_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-print(f"MDT:  {now_mdt.strftime('%Y-%m-%d %H:%M:%S MDT')}")
-print(f"Unix: {int(now_utc.timestamp())}")
-
-print("=== HADES_REPORT ===")
-report_path = f"/home/konan/athenaeum/Codex-Pantheon/reports/hades-{today}.md"
-try:
-    with open(report_path) as f:
-        content = f.read()
-
-    # Extract key sections for a condensed summary
-    errors = []
-
-    # Compilation errors
-    comp_errors = re.findall(r'❌ (.+?)(?:\n|$)', content)
-    errors.extend(comp_errors)
-
-    # General errors section
-    in_errors = False
-    error_lines = []
-    for line in content.split('\n'):
-        if line.startswith('## ❌ Errors'):
-            in_errors = True
-            continue
-        if in_errors:
-            if line.startswith('## ') or line.startswith('---'):
-                break
-            if line.strip().startswith('- ❌') or line.strip().startswith('-'):
-                error_lines.append(line.strip().lstrip('- '))
-
-    # Consistency issues
-    consistency = re.findall(r'⚠️ (.+?)(?:\n|$)', content)
-
-    # Extraction errors
-    extract_errors = re.findall(r'❌ Error: (.+?)(?:\n|$)', content)
-
-    # Build condensed output
-    output_parts = []
-    output_parts.append(f"Report date: {today}")
-
-    if errors:
-        output_parts.append(f"COMPILATION_ERRORS: {' | '.join(errors)}")
-    if error_lines:
-        output_parts.append(f"RUN_ERRORS: {' | '.join(error_lines)}")
-    if consistency:
-        output_parts.append(f"CONSISTENCY: {' | '.join(consistency)}")
-    if extract_errors:
-        output_parts.append(f"EXTRACT_ERRORS: {' | '.join(extract_errors)}")
-
-    # Check for new codices
-    new_cx = re.findall(r'\*\*(Codex-[^*]+)\*\*', content)
-    if new_cx:
-        output_parts.append(f"NEW_CODICES: {', '.join(new_cx)}")
-
-    # Quick stats
-    compiled = re.search(r'Sessions compiled: (\d+)', content)
-    articles = re.search(r'Articles created: (\d+)', content)
-    distilled = re.search(r'Distilled files written: (\d+)', content)
-    stats = []
-    if compiled: stats.append(f"compiled={compiled.group(1)}")
-    if articles: stats.append(f"articles={articles.group(1)}")
-    if distilled: stats.append(f"distilled={distilled.group(1)}")
-    if stats:
-        output_parts.append(f"STATS: {', '.join(stats)}")
-
-    if not errors and not error_lines and not consistency and not extract_errors:
-        output_parts.append("STATUS: GREEN")
-
-    sys.stdout.write('\n'.join(output_parts))
-
-except FileNotFoundError:
-    print("[No Hades report for today yet — consolidation may not have run]")
-except Exception as e:
-    print(f"[Hades report error: {e}]")
-
-print("\n=== ATHENAEUM_TRIAGE ===", flush=True)
-triage = subprocess.run(
-    [sys.executable, "/home/konan/athenaeum/scripts/athenaeum-triage.py"],
-    check=False,
-    text=True,
-    capture_output=True,
+# ── Config ───────────────────────────────────────────────────────────
+PANTHEON_DIR = os.environ.get("PANTHEON_DIR", os.path.expanduser("~/pantheon"))
+ATHENAEUM_DIR = os.environ.get("ATHENAEUM_DIR", os.path.expanduser("~/athenaeum"))
+HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+PROJECT_IDEAS = os.environ.get(
+    "PROJECT_IDEAS_FILE",
+    os.path.join(PANTHEON_DIR, "project-ideas.md"),
 )
-if triage.stdout:
-    sys.stdout.write(triage.stdout)
-if triage.stderr:
-    sys.stdout.write(triage.stderr)
+UTC_OFFSET = int(os.environ.get("UTC_OFFSET", "-6"))
 
-print("\n=== PROJECT_IDEAS ===", flush=True)
-with open("/home/konan/pantheon/project-ideas.md") as f:
-    sys.stdout.write(f.read())
-sys.stdout.flush()
 
-print("\n=== OVERNIGHT_INBOX ===", flush=True)
-subprocess.run([sys.executable, "/home/konan/.hermes/scripts/overnight-inbox.py"], check=False)
+def _sh(cmd: str, timeout: int = 15) -> str:
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        out = r.stdout.strip()
+        return out if out else (f"[exit {r.returncode}]" if r.returncode else "")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return f"[{e.__class__.__name__}]"
 
-print("\n=== HERMES_UPDATE_CHECK ===")
-subprocess.run(["bash", "/home/konan/.hermes/scripts/check-hermes-update.sh"], check=False)
 
-print("\n=== HERMES_NEWS ===")
-subprocess.run([sys.executable, "/home/konan/.hermes/scripts/hermes-news.py"], check=False)
+def _read(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
 
-print("\n=== PANTHEON_RESEARCH ===")
-subprocess.run([sys.executable, "/home/konan/.hermes/scripts/pantheon-research.py"], check=False)
 
-print("\n=== JOB_MARKET ===")
-subprocess.run([sys.executable, "/home/konan/.hermes/scripts/job-market.py"], check=False)
+# ── Collectors ───────────────────────────────────────────────────────
 
-print("\n=== REDDIT_MONITOR ===")
-subprocess.run([sys.executable, "/home/konan/.hermes/scripts/reddit-monitor.py"], check=False)
+def collect_timestamp() -> str:
+    now = datetime.now(timezone.utc)
+    local = now + timedelta(hours=UTC_OFFSET)
+    return (
+        f"UTC:   {now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+        f"Local: {local.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Unix:  {int(now.timestamp())}"
+    )
 
-print("\n=== GITHUB_STARS ===")
-subprocess.run([sys.executable, "/home/konan/.hermes/scripts/github-stars.py"], check=False)
 
-print("\n=== PROSPECT_REMINDER ===")
-import os
-prospect_file = "/home/konan/workspace/pantheon-prospect-pipeline.md"
-if os.path.exists(prospect_file):
-    print(f"📋 PROSPECT PIPELINE READY: pantheon-prospect-pipeline.md")
-    print(f"   Generated 2026-05-20 — Pocatello + Blackfoot prospects for Pantheon")
-    print(f"   Includes: 10 biz prospects + 22 mental health practices + 30+ email drafts")
-    print(f"   ACTION: Review pipeline doc before daily work begins")
+def collect_hades() -> str:
+    today = date.today().isoformat()
+    report = os.path.join(ATHENAEUM_DIR, "Codex-Pantheon", "reports", f"hades-{today}.md")
+    content = _read(report)
+    if not content:
+        return "[No Hades report for today — nightly consolidation may not have run]"
+    lines = content.splitlines()
+    key = [l for l in lines if any(
+        t in l for t in ("❌", "⚠️", "✅", "## ", "Sessions compiled",
+                         "Articles created", "Distilled", "STATUS", "Codex-")
+    )]
+    return "\n".join(key[:40]) if key else content[:2000]
+
+
+def collect_triage() -> str:
+    script = os.path.join(ATHENAEUM_DIR, "scripts", "athenaeum-triage.py")
+    if not os.path.exists(script):
+        return "[athenaeum-triage.py not found — skipping]"
+    return _sh(f"python3 {script}", timeout=30)
+
+
+def collect_project_ideas() -> str:
+    c = _read(PROJECT_IDEAS)
+    return c or "[No project ideas file — skipping]"
+
+
+def collect_update_check() -> str:
+    return f"Hermes: {_sh('hermes --version 2>/dev/null || echo unknown')}"
+
+
+def collect_git_status() -> str:
+    results = []
+    for repo in [PANTHEON_DIR, ATHENAEUM_DIR]:
+        git_dir = os.path.join(repo, ".git")
+        if os.path.isdir(git_dir):
+            status = _sh(f"cd {repo} && git status --short")
+            branch = _sh(f"cd {repo} && git branch --show-current")
+            label = os.path.basename(repo)
+            if status:
+                results.append(f"[{label}] ({branch}):\n{status}")
+            else:
+                results.append(f"[{label}] ✓ clean")
+    return "\n".join(results) or "[No git repos found]"
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+def main() -> None:
+    collectors = [
+        ("TIMESTAMP", collect_timestamp),
+        ("HADES_REPORT", collect_hades),
+        ("ATHENAEUM_TRIAGE", collect_triage),
+        ("PROJECT_IDEAS", collect_project_ideas),
+        ("HERMES_UPDATE", collect_update_check),
+        ("GIT_STATUS", collect_git_status),
+    ]
+    for header, fn in collectors:
+        print(f"=== {header} ===")
+        try:
+            out = fn()
+            if out:
+                print(out)
+        except Exception as e:
+            print(f"[collector error: {e}]")
+        print()
+
+
+if __name__ == "__main__":
+    main()

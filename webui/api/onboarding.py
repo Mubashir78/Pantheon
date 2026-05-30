@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import socket
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -1265,6 +1267,291 @@ _OPENCODE_REFERRAL_URL = "https://opencode.ai/go?ref=3QSR50S9K2"
 _OPENCODE_MODELS_URL = "https://api.opencode.ai/v1/models"
 _OPENCODE_VERIFY_TIMEOUT = 10.0
 
+# ── BYOK provider → env var mapping (onboarding runtime-choice) ──────
+_BYOK_ENV_VAR_MAP: dict[str, str] = {
+    "opencode":     "OPENCODE_API_KEY",
+    "anthropic":    "ANTHROPIC_API_KEY",
+    "nous":         "NOUS_API_KEY",
+    "openai":       "OPENAI_API_KEY",
+    "google":       "GEMINI_API_KEY",
+    "ollama-cloud": "OLLAMA_CLOUD_API_KEY",
+    "kilo":         "KILO_API_KEY",
+    "crof":         "CROF_API_KEY",
+}
+
+
+def save_byok_key(provider: str, api_key: str) -> dict:
+    """Save a BYOK API key to the Hermes .env file.
+
+    Maps the onboarding provider ID to the correct environment variable
+    and writes it to ``~/.hermes/.env`` via _write_env_file, then
+    reloads the dotenv cache so the key is immediately available.
+    """
+    if not provider or not api_key:
+        raise ValueError("provider and api_key are required")
+
+    env_var = _BYOK_ENV_VAR_MAP.get(provider)
+    if not env_var:
+        raise ValueError(f"Unknown BYOK provider: {provider}")
+
+    env_path = _get_active_hermes_home() / ".env"
+    _write_env_file(env_path, {env_var: api_key})
+
+    # Reload so the key is immediately visible to Hermes
+    try:
+        from api.profiles import _reload_dotenv
+        _reload_dotenv(_get_active_hermes_home())
+    except Exception:
+        logger.debug("Failed to reload dotenv after BYOK save")
+
+    # Set directly on os.environ as belt-and-braces
+    os.environ[env_var] = api_key
+
+    return {"ok": True, "provider": provider, "env_var": env_var}
+
+
+def save_composio_key(api_key: str) -> dict:
+    """Save the Composio API key and return workspace info.
+
+    Writes the key to ``~/.composio/user_data.json`` and returns the
+    workspace slug extracted from the key or a basic verification result.
+    """
+    if not api_key or not api_key.strip():
+        raise ValueError("api_key is required")
+
+    api_key = api_key.strip()
+
+    # Basic format check: Composio keys start with ck_ or uak_
+    if not (api_key.startswith("ck_") or api_key.startswith("uak_")):
+        raise ValueError("Invalid Composio API key format (should start with ck_ or uak_)")
+
+    # Write to ~/.composio/user_data.json
+    composio_dir = Path.home() / ".composio"
+    composio_dir.mkdir(parents=True, exist_ok=True)
+    user_data_path = composio_dir / "user_data.json"
+
+    import json as _json
+    user_data: dict = {}
+    if user_data_path.exists():
+        try:
+            user_data = _json.loads(user_data_path.read_text())
+        except Exception:
+            user_data = {}
+
+    user_data["api_key"] = api_key
+    user_data["base_url"] = user_data.get("base_url", "https://backend.composio.dev")
+    user_data_path.write_text(_json.dumps(user_data, indent=2))
+
+    # Also set as env var for immediate use
+    os.environ["COMPOSIO_API_KEY"] = api_key
+
+    # Try to extract workspace from the key (basic: use composio CLI if available)
+    workspace: str | None = user_data.get("org_id") or user_data.get("workspace")
+
+    return {
+        "ok": True,
+        "workspace": workspace,
+        "message": "Composio API key saved to ~/.composio/user_data.json",
+    }
+
+
+# ── Composio Status / Connection Detection ────────────────────
+
+
+def check_composio() -> dict:
+    """Check if Composio CLI is installed, authenticated, and has an API key.
+
+    Returns:
+        {"active": bool, "whoami": {...}, "has_api_key": bool, "error": str|None}
+    """
+    _composio_bin = Path.home() / ".composio" / "composio"
+    if not _composio_bin.exists():
+        return {
+            "active": False,
+            "has_api_key": False,
+            "error": "Composio CLI not found at ~/.composio/composio",
+        }
+
+    # Check CLI auth via whoami (uses OAuth session, not API key)
+    try:
+        _r = subprocess.run(
+            [str(_composio_bin), "whoami"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if _r.returncode != 0:
+            return {
+                "active": False,
+                "has_api_key": False,
+                "error": f"composio whoami failed: {_r.stderr.strip()}",
+            }
+        # whoami outputs JSON on last line (update notice may precede it)
+        _lines = [l for l in _r.stdout.splitlines() if l.strip().startswith("{")]
+        _whoami = json.loads(_lines[-1]) if _lines else {}
+    except Exception as _e:
+        return {"active": False, "has_api_key": False, "error": str(_e)}
+
+    # Check for API key in user_data.json
+    _has_key = False
+    _ud_path = Path.home() / ".composio" / "user_data.json"
+    if _ud_path.exists():
+        try:
+            _ud = json.loads(_ud_path.read_text())
+            _has_key = bool(_ud.get("api_key"))
+        except Exception:
+            pass
+
+    return {
+        "active": True,
+        "whoami": _whoami,
+        "has_api_key": _has_key,
+        "error": None,
+    }
+
+
+def get_composio_connections() -> dict:
+    """List connected Composio accounts via the MCP Bearer token.
+
+    Reads the OAuth token from ``~/.hermes/mcp-tokens/composio.json``
+    (the same token Hermes uses for MCP tool calls) and calls
+    ``COMPOSIO_MANAGE_CONNECTIONS`` to discover active connections.
+
+    Returns:
+        {"connections": [{"provider": str, "account_id": str, "status": str}, ...],
+         "error": str|None}
+    """
+    import re as _re
+
+    _mcp_token_path = Path.home() / ".hermes" / "mcp-tokens" / "composio.json"
+    if not _mcp_token_path.exists():
+        return {
+            "connections": [],
+            "error": "No Composio MCP token found. Connect Composio in Hermes settings first.",
+        }
+
+    try:
+        _td = json.loads(_mcp_token_path.read_text())
+        _access_token = _td.get("access_token")
+    except Exception:
+        return {"connections": [], "error": "Failed to read MCP token file."}
+
+    if not _access_token:
+        return {"connections": [], "error": "No access token in MCP token file."}
+
+    # Map Pantheon adapter provider names → Composio toolkit slugs
+    _PROVIDER_TO_TOOLKIT = {
+        "gmail": "gmail",
+        "github": "github",
+        "slack": "slack",
+        "google_calendar": "googlecalendar",
+        "outlook": "outlook",
+        "microsoft_teams": "microsoft_teams",
+        "notion": "notion",
+        "discord": "discord",
+    }
+    _TOOLKIT_TO_PROVIDER = {v: k for k, v in _PROVIDER_TO_TOOLKIT.items()}
+    _all_toolkits = list(_PROVIDER_TO_TOOLKIT.values())
+
+    try:
+        _req = urllib.request.Request(
+            "https://connect.composio.dev/mcp",
+            headers={
+                "Authorization": f"Bearer {_access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "COMPOSIO_MANAGE_CONNECTIONS",
+                    "arguments": {
+                        "toolkits": _all_toolkits,
+                        "action": "list",
+                    },
+                },
+            }).encode(),
+        )
+
+        with urllib.request.urlopen(_req, timeout=15) as _resp:
+            _raw = _resp.read().decode()
+
+        # Parse SSE stream — extract data: lines
+        _data_lines = _re.findall(r"^data:\s*(.+)$", _raw, _re.MULTILINE)
+        _connections = []
+        for _dl in _data_lines:
+            try:
+                _parsed = json.loads(_dl)
+                _content = _parsed.get("result", {}).get("content", [])
+                for _c in _content:
+                    _text = _c.get("text", "")
+                    try:
+                        _data = json.loads(_text)
+                        _results = _data.get("data", {}).get("results", {})
+                        for _toolkit, _info in _results.items():
+                            _provider = _TOOLKIT_TO_PROVIDER.get(_toolkit, _toolkit)
+                            for _acct in _info.get("accounts", []):
+                                _status = _acct.get("status", "unknown")
+                                _connections.append({
+                                    "provider": _provider,
+                                    "account_id": _acct.get("id", ""),
+                                    "status": _status,
+                                    "is_default": _acct.get("is_default", False),
+                                })
+                    except json.JSONDecodeError:
+                        pass
+                break  # Only process first message
+            except json.JSONDecodeError:
+                pass
+
+        return {"connections": _connections, "error": None}
+
+    except urllib.error.HTTPError as _e:
+        _body = _e.read().decode()[:300] if hasattr(_e, "read") else str(_e)
+        return {"connections": [], "error": f"MCP request failed (HTTP {_e.code}): {_body}"}
+    except Exception as _e:
+        return {"connections": [], "error": str(_e)[:200]}
+
+
+_VOICE_INSTALL_MAP = {
+    "faster-whisper-base":    ("faster-whisper", "base"),
+    "faster-whisper-small":   ("faster-whisper", "small"),
+    "whisper-cpp-medium":     ("whisper-cpp",   "medium"),
+}
+
+
+def install_voice_provider(provider_id: str) -> dict:
+    """Install the selected voice transcription provider."""
+    import subprocess
+
+    if provider_id not in _VOICE_INSTALL_MAP:
+        raise ValueError(f"Unknown voice provider: {provider_id}")
+
+    engine, model_size = _VOICE_INSTALL_MAP[provider_id]
+    results = []
+
+    if engine == "faster-whisper":
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "faster-whisper"],
+                capture_output=True, text=True, timeout=120,
+            )
+            results.append({"step": "pip-install", "status": "done"})
+        except Exception as e:
+            return {"ok": False, "error": str(e), "results": results}
+
+    elif engine == "whisper-cpp":
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "whisper-cpp-python"],
+                capture_output=True, text=True, timeout=120,
+            )
+            results.append({"step": "pip-install", "status": "done"})
+        except Exception as e:
+            return {"ok": False, "error": str(e), "results": results}
+
+    return {"ok": True, "provider": provider_id, "engine": engine, "model": model_size, "results": results}
+
 
 def verify_opencode_key(api_key: str | None) -> dict:
     """Verify an OpenCode Go API key by listing available models.
@@ -1398,19 +1685,18 @@ def verify_opencode_key(api_key: str | None) -> dict:
 
 # ── Context Gathering Pipeline ──────────────────────────────
 
-_context_gathering_state: dict[str, str | None] = {
+_context_gathering_state: dict[str, object] = {
     "status": "idle",  # idle | running | done | error
     "error": None,
 }
 
 
 def start_context_gathering() -> dict:
-    """Fire-and-forget: start the context gathering pipeline.
+    """Fire-and-forget: sync connected providers and ingest into Codex-Stream.
 
-    If OAuth connections exist, searches Gmail for LinkedIn profile URL,
-    then builds a PROFILE.md via LLM summariser. Runs asynchronously —
-    the caller gets an immediate ``{"status": "running"}`` response and
-    polls ``GET /api/onboarding/context-gathering/status`` for updates.
+    Detects connected Composio accounts, runs each registered adapter's
+    ``sync()``, feeds ``SyncRecord`` s into ``ingest_into_codex_stream()``,
+    and writes a ``PROFILE.md`` summary to the Athenaeum.
     """
     global _context_gathering_state
 
@@ -1419,22 +1705,250 @@ def start_context_gathering() -> dict:
 
     _context_gathering_state = {"status": "running", "error": None}
 
-    # ── MVP: immediate completion (real pipeline deferred to T22) ──
-    import threading
-
     def _run_pipeline():
         global _context_gathering_state
         try:
-            # Placeholder — real implementation will:
-            #   1. Check connected OAuth providers via sync state
-            #   2. Call Gmail adapter to search "from:linkedin.com"
-            #   3. Extract LinkedIn URL → LLM summarise → write PROFILE.md
-            #   4. Update status to "done"
-            import time
-            time.sleep(1)  # brief pause to make the toast visible
-            _context_gathering_state = {"status": "done", "error": None}
+            # ── 1. Read MCP OAuth token ──────────────────────────
+            _mcp_token_path = Path.home() / ".hermes" / "mcp-tokens" / "composio.json"
+            if not _mcp_token_path.exists():
+                _context_gathering_state = {
+                    "status": "done",
+                    "error": None,
+                    "detail": "no mcp token",
+                }
+                return
+
+            try:
+                _td = json.loads(_mcp_token_path.read_text())
+                _access_token = _td.get("access_token")
+            except Exception:
+                _context_gathering_state = {
+                    "status": "done",
+                    "error": None,
+                    "detail": "unreadable mcp token",
+                }
+                return
+
+            if not _access_token:
+                _context_gathering_state = {
+                    "status": "done",
+                    "error": None,
+                    "detail": "no access token",
+                }
+                return
+
+            # ── 2. Path setup for pipeline only ───────────────────
+            import sys as _sys
+
+            _pipeline_root = str(
+                Path.home() / "athenaeum" / "Codex-Stream" / "ingest"
+            )
+            if _pipeline_root not in _sys.path:
+                _sys.path.insert(0, _pipeline_root)
+
+            from pipeline import ingest_into_codex_stream
+
+            # ── 3. Discover active connections via MCP ────────────
+            import re as _re
+
+            _PROVIDER_TO_TOOLKIT = {
+                "gmail": "gmail",
+                "github": "github",
+                "slack": "slack",
+                "google_calendar": "googlecalendar",
+                "outlook": "outlook",
+                "microsoft_teams": "microsoft_teams",
+                "notion": "notion",
+                "discord": "discord",
+            }
+            _TOOLKIT_TO_PROVIDER = {v: k for k, v in _PROVIDER_TO_TOOLKIT.items()}
+            _all_toolkits = list(_PROVIDER_TO_TOOLKIT.values())
+
+            # ── MCP helper ────────────────────────────────────────
+            def _mcp_call(tool_name: str, arguments: dict) -> dict:
+                """Call a Composio MCP tool and return parsed result."""
+                _req = urllib.request.Request(
+                    "https://connect.composio.dev/mcp",
+                    headers={
+                        "Authorization": f"Bearer {_access_token}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                    },
+                    data=json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": tool_name,
+                            "arguments": arguments,
+                        },
+                    }).encode(),
+                )
+                with urllib.request.urlopen(_req, timeout=30) as _resp:
+                    _raw = _resp.read().decode()
+                _data_lines = _re.findall(
+                    r"^data:\s*(.+)$", _raw, _re.MULTILINE
+                )
+                for _dl in _data_lines:
+                    try:
+                        _parsed = json.loads(_dl)
+                        _content = _parsed.get("result", {}).get("content", [])
+                        for _c in _content:
+                            _text = _c.get("text", "")
+                            try:
+                                return json.loads(_text)
+                            except json.JSONDecodeError:
+                                return {"error": _text}
+                        break
+                    except json.JSONDecodeError:
+                        pass
+                return {"error": "no data in response"}
+
+            # ── 4. Query connected accounts ───────────────────────
+            _disc_result = _mcp_call(
+                "COMPOSIO_MANAGE_CONNECTIONS",
+                {"toolkits": _all_toolkits, "action": "list"},
+            )
+            _disc_data = _disc_result.get("data", {})
+            _disc_results = _disc_data.get("results", {})
+
+            # ── 5. Lightweight read tools per provider ────────────
+            _PROVIDER_TOOLS: dict[str, tuple[str, dict]] = {
+                "gmail": (
+                    "GMAIL_FETCH_EMAILS",
+                    {"max_results": 5, "q": "is:unread"},
+                ),
+                "github": (
+                    "GITHUB_GET_THE_AUTHENTICATED_USER",
+                    {},
+                ),
+                "slack": (
+                    "SLACK_LIST_CHANNELS",
+                    {},
+                ),
+                "google_calendar": (
+                    "GOOGLECALENDAR_LIST_CALENDARS",
+                    {},
+                ),
+                "notion": (
+                    "NOTION_LIST_USERS",
+                    {},
+                ),
+                "discord": (
+                    "DISCORD_LIST_GUILDS",
+                    {},
+                ),
+                "outlook": (
+                    "OUTLOOK_LIST_MESSAGES",
+                    {"max_results": 5},
+                ),
+                "microsoft_teams": (
+                    "MICROSOFT_TEAMS_LIST_CHANNELS",
+                    {},
+                ),
+            }
+
+            results: list[dict] = []
+            for _toolkit, _info in _disc_results.items():
+                _provider = _TOOLKIT_TO_PROVIDER.get(_toolkit)
+                if not _provider:
+                    continue
+
+                # Only process active connections
+                _active = [
+                    a for a in _info.get("accounts", [])
+                    if a.get("status") == "active"
+                ]
+                if not _active:
+                    continue
+
+                _tool_spec = _PROVIDER_TOOLS.get(_provider)
+                if not _tool_spec:
+                    continue
+
+                _tool_slug, _tool_args = _tool_spec
+                _conn_id = f"{_provider}-primary"
+
+                try:
+                    _exec_result = _mcp_call(
+                        "COMPOSIO_MULTI_EXECUTE_TOOL",
+                        {
+                            "tools": [
+                                {
+                                    "tool_slug": _tool_slug,
+                                    "arguments": _tool_args,
+                                }
+                            ]
+                        },
+                    )
+
+                    _exec_data = _exec_result.get("data", {})
+                    _exec_items = _exec_data.get("results", [])
+                    _success = _exec_data.get("success_count", 0)
+
+                    if _success > 0 and _exec_items:
+                        _raw_response = _exec_items[0].get("response", {})
+                        _raw_data = _raw_response.get("data", {})
+
+                        # Canonicalize: build markdown from raw provider data
+                        _content = _canonicalize_provider_data(
+                            _provider, _raw_data
+                        )
+                        _record = {
+                            "content": _content,
+                            "metadata": {
+                                "provider": _provider,
+                                "tool": _tool_slug,
+                                "source": "mcp-onboarding",
+                            },
+                            "provider": _provider,
+                        }
+
+                        _conn = {
+                            "id": _conn_id,
+                            "provider": _provider,
+                        }
+                        _ir = ingest_into_codex_stream(_record, _conn)
+                        results.append({
+                            "provider": _provider,
+                            "synced": 1,
+                            "ingested": _ir.chunks_written,
+                            "status": "ok",
+                        })
+                    else:
+                        results.append({
+                            "provider": _provider,
+                            "synced": 0,
+                            "ingested": 0,
+                            "status": "empty",
+                        })
+                except Exception as _exc:
+                    results.append({
+                        "provider": _provider,
+                        "synced": 0,
+                        "ingested": 0,
+                        "status": "error",
+                        "error": str(_exc)[:200],
+                    })
+
+            # ── 6. Write PROFILE.md summary ───────────────────────
+            _write_profile_summary(results)
+
+            _context_gathering_state = {
+                "status": "done",
+                "error": None,
+                "providers": results,
+            }
         except Exception as exc:
-            _context_gathering_state = {"status": "error", "error": str(exc)}
+            import traceback as _tb
+
+            _context_gathering_state = {
+                "status": "error",
+                "error": str(exc),
+                "traceback": _tb.format_exc(),
+            }
+
+    import threading
 
     threading.Thread(target=_run_pipeline, daemon=True).start()
 
@@ -1443,4 +1957,130 @@ def start_context_gathering() -> dict:
 
 def get_context_gathering_status() -> dict:
     """Return the current pipeline status."""
-    return dict(_context_gathering_state)
+    return dict(_context_gathering_state)  # type: ignore[arg-type]
+
+
+# ── Helpers ───────────────────────────────────────────────────
+
+
+def _write_profile_summary(results: list[dict]) -> None:
+    """Write a PROFILE.md to the Athenaeum summarizing ingested data."""
+    from datetime import datetime, timezone
+
+    _athenaeum = Path.home() / "athenaeum"
+    _athenaeum.mkdir(parents=True, exist_ok=True)
+
+    _lines = [
+        "# Pantheon User Profile\n",
+        f"\n> Auto-generated during onboarding on "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n",
+    ]
+
+    _connected = [r for r in results if r.get("synced", 0) > 0]
+    _errors = [r for r in results if r.get("status") == "error"]
+
+    if _connected:
+        _lines.append("\n## Connected Providers\n")
+        for _r in _connected:
+            _lines.append(
+                f"- **{_r['provider']}**: {_r['synced']} records synced, "
+                f"{_r['ingested']} chunks ingested\n"
+            )
+
+    if _errors:
+        _lines.append("\n## Errors\n")
+        for _r in _errors:
+            _lines.append(
+                f"- **{_r['provider']}**: {_r.get('error', 'unknown')}\n"
+            )
+
+    if not _connected and not _errors:
+        _lines.append(
+            "\n*No connected providers found. "
+            "Connect integrations from Settings → Integrations.*\n"
+        )
+
+    (_athenaeum / "PROFILE.md").write_text("".join(_lines))
+    logger.info("Wrote PROFILE.md after context gathering (%d providers)", len(results))
+
+
+def _canonicalize_provider_data(provider: str, raw_data: dict) -> str:
+    """Convert raw provider API response to structured markdown.
+
+    Each provider gets a lightweight canonical form suitable for
+    the Codex-Stream ingestion pipeline.
+    """
+    if provider == "github":
+        _login = raw_data.get("login", "unknown")
+        _name = raw_data.get("name") or _login
+        _bio = raw_data.get("bio") or "(no bio)"
+        _repos = raw_data.get("public_repos", 0)
+        _company = raw_data.get("company") or "N/A"
+        return (
+            f"# GitHub Profile\n\n"
+            f"**Username:** {_login}\n"
+            f"**Name:** {_name}\n"
+            f"**Bio:** {_bio}\n"
+            f"**Company:** {_company}\n"
+            f"**Public Repos:** {_repos}\n"
+        )
+
+    if provider == "gmail":
+        _messages = raw_data if isinstance(raw_data, list) else raw_data.get("messages", [])
+        if not _messages:
+            return "# Gmail\n\n*No recent unread emails.*\n"
+        _lines = ["# Gmail — Recent Unread\n"]
+        for _msg in _messages[:5]:
+            _subj = _msg.get("subject", "(no subject)")
+            _from = _msg.get("from", _msg.get("sender", "unknown"))
+            _snippet = (_msg.get("snippet") or _msg.get("body") or "")[:200]
+            _lines.append(f"\n## {_subj}\n\n**From:** {_from}\n\n{_snippet}\n")
+        return "".join(_lines)
+
+    if provider == "slack":
+        _channels = raw_data if isinstance(raw_data, list) else raw_data.get("channels", [])
+        if not _channels:
+            return "# Slack\n\n*No channels found.*\n"
+        _lines = ["# Slack — Channels\n"]
+        for _ch in _channels[:10]:
+            _name = _ch.get("name", _ch.get("channel_name", "?"))
+            _topic = _ch.get("topic", {}).get("value", "") if isinstance(_ch.get("topic"), dict) else ""
+            _lines.append(f"- **#{_name}** {_topic}\n")
+        return "".join(_lines)
+
+    if provider == "google_calendar":
+        _calendars = raw_data if isinstance(raw_data, list) else raw_data.get("items", [])
+        if not _calendars:
+            return "# Google Calendar\n\n*No calendars found.*\n"
+        _lines = ["# Google Calendar\n"]
+        for _cal in _calendars[:5]:
+            _summary = _cal.get("summary", "(unnamed)")
+            _lines.append(f"- {_summary}\n")
+        return "".join(_lines)
+
+    if provider == "notion":
+        _users = raw_data if isinstance(raw_data, list) else raw_data.get("results", [])
+        if not _users:
+            return "# Notion\n\n*No users found.*\n"
+        _lines = ["# Notion — Users\n"]
+        for _u in _users[:5]:
+            _name = _u.get("name", "?")
+            _type = _u.get("type", "?")
+            _lines.append(f"- **{_name}** ({_type})\n")
+        return "".join(_lines)
+
+    if provider == "discord":
+        _guilds = raw_data if isinstance(raw_data, list) else []
+        if not _guilds:
+            return "# Discord\n\n*No guilds found.*\n"
+        _lines = ["# Discord — Guilds\n"]
+        for _g in _guilds[:10]:
+            _name = _g.get("name", "?")
+            _lines.append(f"- {_name}\n")
+        return "".join(_lines)
+
+    # Generic: dump as JSON for unknown providers
+    return (
+        f"# {provider.replace('_', ' ').title()}\n\n"
+        f"```json\n{json.dumps(raw_data, indent=2, default=str)[:3000]}\n```\n"
+    )
