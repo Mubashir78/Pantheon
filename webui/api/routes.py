@@ -7111,10 +7111,17 @@ def handle_post(handler, parsed) -> bool:
             token_part = session_token  # Full "token.sig" format needed for verify_session
             _olympus_assoc(session_token.split(".")[0], user["id"])
             user_data = _olympus_bootstrap(user)
-            j(handler, {
+            # Set cookie for persistent login across refreshes
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Cache-Control", "no-store")
+            _security_headers(handler)
+            set_auth_cookie(handler, session_token)
+            handler.end_headers()
+            handler.wfile.write(json.dumps({
                 "token": token_part,
                 "user": user_data.get("user", user) if isinstance(user_data, dict) else user,
-            })
+            }).encode())
             return True
 
         # Legacy single-password auth
