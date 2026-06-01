@@ -198,10 +198,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | 🔲 |
+| **Status** | ✅ |
+| **Commit** | `db61011` (Olympus-UI) |
 | **Priority** | P1 |
 | **Depends on** | Nothing |
-| **Files** | `Sidebar.tsx` |
+| **Files** | `Sidebar.tsx`, `AdminPanel.tsx`, `app-store.ts`, `index.lazy.tsx` |
 
 **Issues from user:**
 1. Admin shield should be ABOVE Profile/Settings at bottom (not under Tools)
@@ -406,10 +407,10 @@
 
 | Category | Tasks | Status |
 |---|---|---|
-| **Blockers** (B1–B5) | 5 | 🔲 0/5 |
-| **Major Fixes** (B6–B10) | 5 | 🔲 0/5 |
+| **Blockers** (B1–B5) | 5 | ✅ 5/5 |
+| **Major Fixes** (B6–B10) | 5 | 🔲 1/5 (B7 done) |
 | **Polish** (B11–B13) | 3 | 🔲 0/3 |
-| **Total** | **13** | **🔲 0/13** |
+| **Total** | **13** | **🔲 6/13** |
 
 ---
 
@@ -1900,7 +1901,7 @@ Each concern gets one owner:
 
 ## Current Status Summary
 
-|> Updated: 2026-06-01 — V3.1 Bug Squash active (0/13). Phase 1 complete (41/41). |
+|> Updated: 2026-06-01 — V3.1 Bug Squash active (6/13). Phase 1 complete (41/41). |
 
 | Phase | Tasks | Status |
 |---|---|---|
