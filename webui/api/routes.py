@@ -2907,6 +2907,52 @@ def _handle_plugins(handler, parsed) -> bool:
         )
 
 
+def _handle_plugin_toggle(handler, parsed, body) -> bool:
+    """Toggle a plugin's enabled state via PUT /api/plugins/{key}/toggle."""
+    from urllib.parse import unquote
+
+    parts = parsed.path.split("/")
+    if len(parts) < 4:
+        return bad(handler, "Invalid toggle path", 400)
+    plugin_key = unquote(parts[3])
+    enabled = body.get("enabled", True)
+
+    manager = _get_plugin_manager_for_visibility()
+    manager.discover_and_load(force=False)
+    raw_plugins = getattr(manager, "_plugins", {}) or {}
+
+    loaded = raw_plugins.get(plugin_key)
+    if loaded is None:
+        # Try to find by name match
+        for key, candidate in raw_plugins.items():
+            manifest = getattr(candidate, "manifest", None)
+            name = getattr(manifest, "name", "") if manifest else ""
+            if name == plugin_key:
+                loaded = candidate
+                break
+
+    if loaded is None:
+        return bad(handler, f"Plugin not found: {plugin_key}", 404)
+
+    loaded.enabled = enabled
+
+    # Build sanitized response for the single plugin
+    manifest = getattr(loaded, "manifest", None)
+    name = getattr(manifest, "name", "") if manifest else plugin_key
+    version = getattr(manifest, "version", "") if manifest else ""
+    description = getattr(manifest, "description", "") if manifest else ""
+    registered = list(getattr(loaded, "hooks_registered", []) or [])
+
+    return j(handler, {
+        "name": name,
+        "key": plugin_key,
+        "version": version,
+        "description": description,
+        "enabled": bool(loaded.enabled),
+        "hooks": registered,
+    })
+
+
 _SHELL_ERROR_HTML = """<!doctype html>
 <html lang=\"en\">
 <head>
@@ -4822,6 +4868,14 @@ def handle_post(handler, parsed) -> bool:
         return handle_transcribe(handler)
 
     body = read_body(handler)
+
+    # ── Plugin toggle (PUT) ──
+    if parsed.path.startswith("/api/plugins/") and parsed.path.endswith("/toggle"):
+        return _handle_plugin_toggle(handler, parsed, body)
+
+    # ── Cron toggle (PUT) ──
+    if parsed.path.startswith("/api/cron/") and parsed.path.endswith("/toggle"):
+        return _handle_cron_toggle(handler, parsed, body)
 
     # ── n8n API (POST) ───────────────────────────────────────────────────────
     if parsed.path.startswith("/api/n8n/credentials/") and parsed.path.endswith("/connect"):
@@ -9373,6 +9427,38 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
             break
     body = ("\n".join(lines[response_idx + 1:]) if response_idx >= 0 else "\n".join(lines)).strip()
     return body[:limit] or "(empty)"
+
+
+def _handle_cron_toggle(handler, parsed, body):
+    """Toggle a cron job's enabled state via PUT /api/cron/{id}/toggle."""
+    from urllib.parse import unquote
+    from cron.jobs import list_jobs, pause_job, resume_job
+    from api.profiles import cron_profile_context
+
+    parts = parsed.path.split("/")
+    if len(parts) < 4:
+        return bad(handler, "Invalid toggle path", 400)
+    job_id = unquote(parts[3])
+    enabled = body.get("enabled", True)
+
+    with cron_profile_context():
+        jobs = list_jobs(include_disabled=True)
+        job = next((j for j in jobs if j.get("id") == job_id), None)
+        if job is None:
+            return bad(handler, f"Cron job not found: {job_id}", 404)
+
+        if enabled:
+            resume_job(job_id)
+        else:
+            pause_job(job_id)
+
+        # Re-fetch to get updated state
+        jobs = list_jobs(include_disabled=True)
+        job = next((j for j in jobs if j.get("id") == job_id), None)
+        if job is None:
+            return bad(handler, f"Cron job not found after toggle: {job_id}", 500)
+
+        return j(handler, _cron_job_for_api(job))
 
 
 def _handle_cron_output(handler, parsed):
