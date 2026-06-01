@@ -40,6 +40,9 @@ if _HERMES_ENV.exists():
 
 _SESSION_TTL = 7200  # purge inactive sessions after 2 hours
 
+# Path to the soulforge concepts directory (Thoth → Hephaestus handoff)
+_SOULFORGE_DIR = Path.home() / "athenaeum" / "soulforge"
+
 # In-memory conversation store: {god_name: {"history": [...], "created_at": float}}
 _FORGE_SESSIONS: dict[str, dict] = {}
 
@@ -210,6 +213,36 @@ def _build_messages(god_name: str, god_domain: str, history: list[dict], user_ms
     return messages
 
 
+def _load_concept(god_name: str) -> tuple[str | None, str | None]:
+    """Check if a concept exists in the soulforge directory.
+
+    Returns (concept_text, handoff_text) — each is None if not found.
+    """
+    concept_dir = _SOULFORGE_DIR / god_name
+    if not concept_dir.is_dir():
+        return None, None
+
+    concept_md = concept_dir / "concept.md"
+    handoff_md = concept_dir / "handoff.md"
+
+    concept_text = None
+    handoff_text = None
+
+    if concept_md.exists():
+        try:
+            concept_text = concept_md.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    if handoff_md.exists():
+        try:
+            handoff_text = handoff_md.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    return concept_text, handoff_text
+
+
 # ── Public API ─────────────────────────────────────────────────────────────
 
 def get_session_info(god_name: str) -> dict | None:
@@ -223,26 +256,52 @@ def get_session_info(god_name: str) -> dict | None:
 def forge_start(god_name: str, god_domain: str) -> dict:
     """Start a new forge session.
 
-    Returns {"reply": str, "soul_draft": str | None, "done": bool}
+    Checks the soulforge concepts directory for an existing concept
+    (placed there by Thoth). If found, loads it as context so Hephaestus
+    builds from existing research rather than starting the full interview.
+
+    Returns {"reply": str, "soul_draft": str | None, "done": bool,
+             "concept_loaded": bool}
     """
     # Reset any existing session
     _delete_session(god_name)
     session = _get_session(god_name)
 
-    initial_msg = f"Let's forge a new god named **{god_name}** whose domain is **{god_domain}**. Begin the interview."
+    # Check for an existing concept from Thoth
+    concept_text, handoff_text = _load_concept(god_name)
+    concept_loaded = bool(concept_text)
+
+    if concept_text:
+        # Concept exists — skip the full interview, use it as context
+        initial_msg = (
+            f"I'm forging a god named **{god_name}** whose domain is **{god_domain}**."
+            f"\n\nThoth has already researched this god and written a concept document. "
+            f"I'll include it below. Please review the concept, then produce a "
+            f"SOUL.md draft based on it. Ask me only for clarifications or gaps "
+            f"you find in the concept.\n\n"
+            f"## Concept Document (from Thoth)\n\n{concept_text}"
+        )
+        if handoff_text:
+            initial_msg += f"\n\n## Build Handoff (from Thoth)\n\n{handoff_text}"
+    else:
+        # No concept — start the full interview
+        initial_msg = (
+            f"Let's forge a new god named **{god_name}** whose domain is "
+            f"**{god_domain}**. Begin the interview."
+        )
 
     messages = _build_messages(god_name, god_domain, [], initial_msg)
 
     reply = _call_llm(messages)
     if reply is None:
-        return {"reply": "⚒️ *The forge flickers...* I'm having trouble reaching the model. Let me know when you want to try again.", "soul_draft": None, "done": False, "error": "llm_unreachable"}
+        return {"reply": "⚒️ *The forge flickers...* I'm having trouble reaching the model. Let me know when you want to try again.", "soul_draft": None, "done": False, "error": "llm_unreachable", "concept_loaded": concept_loaded}
 
     session["history"].append({"role": "user", "content": initial_msg})
     session["history"].append({"role": "assistant", "content": reply})
 
     soul_draft = _extract_soul(reply)
 
-    return {"reply": reply, "soul_draft": soul_draft, "done": bool(soul_draft)}
+    return {"reply": reply, "soul_draft": soul_draft, "done": bool(soul_draft), "concept_loaded": concept_loaded}
 
 
 def forge_chat(god_name: str, god_domain: str, message: str) -> dict:
