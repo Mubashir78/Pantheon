@@ -243,6 +243,67 @@ def _load_concept(god_name: str) -> tuple[str | None, str | None]:
     return concept_text, handoff_text
 
 
+def list_concepts() -> list[dict]:
+    """List all available god concepts in the soulforge directory.
+
+    Returns a list of {name, title, has_handoff} for each concept folder.
+    Skips 'template/' and 'backlog/' — those aren't buildable concepts.
+    """
+    if not _SOULFORGE_DIR.is_dir():
+        return []
+
+    concepts = []
+    for entry in sorted(_SOULFORGE_DIR.iterdir()):
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if name in ("template", "backlog"):
+            continue
+
+        concept_md = entry / "concept.md"
+        handoff_md = entry / "handoff.md"
+        title = name  # fallback
+
+        if concept_md.exists():
+            try:
+                first_line = concept_md.read_text(encoding="utf-8").split("\n")[0]
+                if first_line.startswith("# "):
+                    title = first_line[2:].strip()
+            except Exception:
+                pass
+
+        concepts.append({
+            "name": name,
+            "title": title,
+            "has_handoff": handoff_md.exists(),
+        })
+
+    return concepts
+
+
+def delete_concept(name: str) -> bool:
+    """Delete a concept folder from the soulforge directory.
+
+    Returns True if deleted, False if not found.
+    Refuses to delete 'template' or 'backlog'.
+    """
+    if name in ("template", "backlog"):
+        return False
+
+    import shutil
+    concept_dir = _SOULFORGE_DIR / name
+    if not concept_dir.is_dir():
+        return False
+
+    try:
+        shutil.rmtree(concept_dir)
+        logger.info("Deleted concept: %s", concept_dir)
+        return True
+    except OSError as e:
+        logger.error("Failed to delete concept %s: %s", name, e)
+        return False
+
+
 # ── Public API ─────────────────────────────────────────────────────────────
 
 def get_session_info(god_name: str) -> dict | None:
@@ -253,12 +314,12 @@ def get_session_info(god_name: str) -> dict | None:
     return None
 
 
-def forge_start(god_name: str, god_domain: str) -> dict:
+def forge_start(god_name: str, god_domain: str, concept_name: str | None = None) -> dict:
     """Start a new forge session.
 
-    Checks the soulforge concepts directory for an existing concept
-    (placed there by Thoth). If found, loads it as context so Hephaestus
-    builds from existing research rather than starting the full interview.
+    If concept_name is provided, loads that concept from the soulforge
+    directory as context (instead of auto-matching by god_name).
+    Use list_concepts() to discover available concepts.
 
     Returns {"reply": str, "soul_draft": str | None, "done": bool,
              "concept_loaded": bool}
@@ -268,7 +329,8 @@ def forge_start(god_name: str, god_domain: str) -> dict:
     session = _get_session(god_name)
 
     # Check for an existing concept from Thoth
-    concept_text, handoff_text = _load_concept(god_name)
+    lookup_name = concept_name if concept_name else god_name
+    concept_text, handoff_text = _load_concept(lookup_name)
     concept_loaded = bool(concept_text)
 
     if concept_text:

@@ -5929,6 +5929,28 @@ def handle_post(handler, parsed) -> bool:
         logger.info("Exported %s → %s (%.1f KB)", god_name, tarball_name, len(tarball_data) / 1024)
         return True
 
+    # ── Soulforge Concepts (GET/DELETE) — list and manage Thoth's god concepts ──
+    if parsed.path == "/api/soulforge/concepts" and handler.command == "GET":
+        from api.soul_forge import list_concepts
+        try:
+            concepts = list_concepts()
+            return j(handler, {"concepts": concepts})
+        except Exception as e:
+            return bad(handler, str(e))
+
+    if parsed.path.startswith("/api/soulforge/concepts/") and handler.command == "DELETE":
+        concept_name = parsed.path.split("/")[-1]
+        if not concept_name:
+            return bad(handler, "concept name is required", 400)
+        from api.soul_forge import delete_concept
+        try:
+            ok = delete_concept(concept_name)
+            if ok:
+                return j(handler, {"ok": True, "deleted": concept_name})
+            return bad(handler, f"Concept '{concept_name}' not found", 404)
+        except Exception as e:
+            return bad(handler, str(e))
+
     # ── God Forge (POST) — Hephaestus-powered SOUL.md creation interview ──
     if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/forge"):
         parts = parsed.path.split("/")
@@ -5947,7 +5969,8 @@ def handle_post(handler, parsed) -> bool:
             god_domain = body.get("domain", "").strip() or meta.get("domain", "") or god_name
 
             if action == "start":
-                result = forge_start(god_name, god_domain)
+                concept_name = body.get("concept_name", "").strip() or None
+                result = forge_start(god_name, god_domain, concept_name=concept_name)
                 return j(handler, result)
 
             elif action == "chat":
