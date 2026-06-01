@@ -35,6 +35,7 @@ from sync_state import SyncState
 # ---------------------------------------------------------------------------
 
 from adapters import get_adapter, list_adapters  # noqa: E402
+from adapters.base import sync_with_retry  # T23: retry + backoff
 
 # ---------------------------------------------------------------------------
 # Import Codex-Stream ingest pipeline (T13/P1d)
@@ -246,10 +247,14 @@ def run_sync_tick() -> int:
                 n_skipped += 1
                 continue
 
-            # --- Call adapter -------------------------------------------------
+            # --- Call adapter with retry + backoff (T23) -------------------
             adapter = _resolve_adapter(conn)
+            provider = conn.get("provider", "unknown")
 
-            result = adapter(conn, state)
+            def _call():
+                return adapter(conn, state)
+
+            result = sync_with_retry(_call, provider)
 
             synced = result.get("synced", 0)
             cursor = result.get("cursor")
