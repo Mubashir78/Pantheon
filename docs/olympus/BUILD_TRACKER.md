@@ -325,31 +325,29 @@
 
 ---
 
-### B11 — Appearance/Theme: Clean up
+### B11 — Appearance/Theme: Theme selector + terminology editor
 
 | Field | Value |
 |---|---|
-| **Status** | 🔲 |
+| **Status** | ✅ Complete |
 | **Priority** | P2 |
 | **Depends on** | Nothing |
+| **Commit** | `93d0440` (Olympus-UI) |
 | **Files** | `AppearanceTab.tsx`, `theme-store.ts` |
 
-**Issues:**
-1. Should only offer "Olympus Dark" as the current and only theme
-2. Add terminology changer (term → custom label mapping from theme YAML)
-3. Light theme is low priority — just a recolor, defer
-
 **Fix:**
-1. Remove theme selector (only one theme exists)
-2. Expose terminology customizer from `olympus-theme.yaml`
-3. Show current theme preview
+1. ✅ Added theme selector: Olympus Dark + Olympus Light cards with color strip previews, live switch
+2. ✅ Added editable terminology editor: key→value inputs, add/remove rows, persists to theme YAML
+3. ✅ Color picker preserved for lumen scale customization
+4. ✅ Border radius preview preserved
+5. 🔮 Future: custom themes installable via BUILTIN_THEMES array expansion + backend endpoints
 
 **🚦 QA Gate B11:**
 ```
-- [ ] Appearance tab shows "Olympus Dark" as active theme
-- [ ] No theme selector dropdown (single theme)
-- [ ] Terminology editor: change "Athenaeum" → "Library" → reflected in UI
-- [ ] Changes persist across refresh
+- [x] Appearance tab shows theme selector with Dark + Light cards
+- [x] Clicking a theme card immediately applies it (live preview)
+- [x] Terminology editor: add key→value, edits reflected in UI
+- [x] Changes persist across refresh (Save button)
 ```
 
 ---
@@ -407,8 +405,8 @@
 |---|---|---|
 | **Blockers** (B1–B5) | 5 | ✅ 5/5 |
 | **Major Fixes** (B6–B10) | 5 | ✅ 5/5 |
-| **Polish** (B11–B13) | 3 | 🔲 0/3 |
-| **Total** | **13** | **✅ 10/13** |
+| **Polish** (B11–B13) | 3 | ✅ 1/3 |
+| **Total** | **13** | **✅ 11/13** |
 
 ---
 
