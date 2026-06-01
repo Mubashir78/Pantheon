@@ -1,7 +1,7 @@
 # Olympus UI — Build Tracker
 
 > Systematic build tracker with QA gates. All architectural decisions resolved.
-> Updated: 2026-05-28 — Merged from QUESTIONS.md. All 25 questions answered.
+> Updated: 2026-06-01 — Phase 1 complete (41/41). V3.1 Bug Squash started.
 > Builder: Hephaestus
 
 ## Legend
@@ -11,6 +11,418 @@
 - ❌ Failed / needs fix
 - ➖ Skipped / deferred
 - 🚦 QA Gate — must pass before proceeding
+
+---
+
+## V3.1 Bug Squash — Active Phase
+
+> **Goal:** Fix all 5 blockers + structural reorganization. Frontend-only and small backend fixes — no overlap with Tier 7 refactor.
+> **Started:** 2026-06-01
+
+### 🔴 BLOCKERS — Core Functionality Broken
+
+---
+
+### B1 — Soul Forge: Fix `{"error": "not found"}` on concept list
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P0 — blocks new god creation |
+| **Depends on** | Nothing |
+| **Files** | `routes.py` (handle_get), `GodForgeModal.tsx` |
+
+**Root cause:** `GET /api/soulforge/concepts` route is ONLY in `handle_post` (line 5970), but `listConcepts()` does a GET request which goes to `handle_get`. No matching route → 404. The forge POST endpoint (`/api/gods/{name}/forge`) works fine — confirmed via curl.
+
+**Fix:**
+1. Add `GET /api/soulforge/concepts` + `GET /api/soulforge/concepts/{name}` routes to `handle_get()`
+2. Also use new god template — ensure `forgeStart()` passes proper concept context including system access (athenaeum, ichor, pantheon APIs)
+
+**🚦 QA Gate B1:**
+```
+- [ ] curl GET /api/soulforge/concepts → returns JSON array (not "not found")
+- [ ] Open GodForgeModal → click "Forge Soul" → concepts load (or show empty state)
+- [ ] Select a concept → forge interview starts with concept context
+- [ ] Create Directly still works
+- [ ] New god template includes athenaeum/ichor access defaults
+- [ ] Zero console errors
+```
+
+---
+
+### B2 — Terminal: Does not activate from sidebar
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P0 — dead button |
+| **Depends on** | Nothing |
+| **Files** | `Sidebar.tsx` (line 477) |
+
+**Root cause:** Sidebar.tsx line 477 — `<button style={...}>Terminal</button>` has NO `onClick` handler. Completely dead button.
+
+**Fix:** Add `onClick` — open TerminalPanel as a surface (`setActiveSurface('terminal')` or navigate to Admin with terminal tab active). Also expose Terminal as a top-level sidebar item (not buried under Tools submenu).
+
+**🚦 QA Gate B2:**
+```
+- [ ] Click "Terminal" in sidebar → Terminal panel opens
+- [ ] Terminal accepts input and returns output
+- [ ] Can type commands, see results
+- [ ] Escape/close returns to chat
+- [ ] Zero console errors
+```
+
+---
+
+### B3 — Kanban Board: `Internal server error` (500)
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P0 — broken feature |
+| **Depends on** | Nothing |
+| **Files** | `kanban_bridge.py`, `hermes_cli` |
+
+**Root cause:** `TypeError: init_db() got an unexpected keyword argument 'board'` at `kanban_bridge.py:82`. The installed `hermes_cli.kanban_db.init_db()` doesn't accept a `board` parameter — version mismatch. The kanban_bridge was written for multi-board support but the installed hermes_cli predates it.
+
+**Fix:** Patch `kanban_bridge.py._conn()` to detect the `init_db` signature and fall back to no-arg call for older hermes_cli versions.
+
+**🚦 QA Gate B3:**
+```
+- [ ] curl GET /api/kanban/board → returns JSON with columns + tasks (not 500)
+- [ ] Kanban board renders with real data
+- [ ] Create/edit/move/delete cards works
+- [ ] Zero console errors
+```
+
+---
+
+### B4 — Tasks: HTTP 500
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P0 — broken feature |
+| **Depends on** | B3 (same backend) |
+| **Files** | `TasksPanel.tsx`, `kanban_bridge.py` |
+
+**Root cause:** Frontend calls `GET /api/kanban/tasks` but backend has no GET handler for listing all tasks. The endpoint returns `"unknown Kanban endpoint: GET /api/kanban/tasks"`. The correct endpoint for task listing is `GET /api/kanban/board` (returns columns with tasks grouped).
+
+**Fix:** Fix `TasksPanel.tsx` to call `GET /api/kanban/board` and render the tasks from the response. Or add a GET handler for `/api/kanban/tasks` that returns flat task list.
+
+**🚦 QA Gate B4:**
+```
+- [ ] Tasks panel loads without 500
+- [ ] Tasks display with status, assignee, due date
+- [ ] Create/edit/complete tasks works
+- [ ] Zero console errors
+```
+
+---
+
+### B5 — Summon: God doesn't appear in GodPicker + Model verification
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P0 — blocks summoned god usage |
+| **Depends on** | Nothing |
+| **Files** | `SummonDrawer.tsx`, `god-store.ts`, `routes.py` |
+
+**Root cause (part 1 — god not appearing):**
+1. After summon succeeds, `SummonDrawer.tsx` sets button state to 'done' but NEVER refreshes the god store
+2. `useGods()` fetches once on boot (`__root.tsx`) — no re-fetch on summon
+3. The summoned god IS properly written to disk (SOUL.md + god.json), but the frontend doesn't know about it
+4. Confirmed: marvin has full profile directory + SOUL.md but NO god.json (metadata write silently failed — `except Exception: pass` at line 6117)
+
+**Root cause (part 2 — model verification):**
+1. Summoned gods get the default model from profile creation — never verified against available system models
+2. If the god's SOUL.md specifies a model not installed, the god silently breaks on first use
+3. No user-facing flow to select/correct the model
+
+**Fix:**
+1. After summon success, call `useGodStore.getState().refreshGods()` — fetch `/api/gods` and update store
+2. Make god.json write failures non-silent — log the error, return it in the response
+3. Add model verification step: after summon/create, check available models via `/api/models` and if the god's model isn't available, prompt user to select from available models
+4. Add a model picker to the SummonDrawer success state and GodForgeModal
+
+**🚦 QA Gate B5:**
+```
+- [ ] Summon a god from the list → god appears in GodPicker without page refresh
+- [ ] God has god.json with correct metadata (display name, domain, color)
+- [ ] Summon a god with non-existent model → model picker appears with available models
+- [ ] Select available model → god created with working model
+- [ ] Summon a god with existing model → model auto-assigned, no picker needed
+- [ ] Delete summoned god → disappears from GodPicker
+- [ ] Re-summon same god → "already exists" handled gracefully
+- [ ] Zero console errors
+```
+
+---
+
+### 🟠 MAJOR — Data & Navigation Fixes
+
+---
+
+### B6 — Stream: Wrong location + stale data
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 |
+| **Depends on** | Nothing |
+| **Files** | `Sidebar.tsx`, `StreamDashboard.tsx`, `stream.py`, `routes.py` |
+
+**Issues:**
+1. Stream shows in sidebar — user wants it in Settings
+2. Showing only 6 entities, 3 sources, 1MB — obviously stale/wrong data (Athenaeum has way more)
+3. Data source: Stream pulls from Codex-Stream hotness.json which may have stale/empty data
+
+**Fix:**
+1. Move Stream nav from sidebar to Settings tab
+2. Wire Stream metrics to real Athenaeum stats (walk athenaeum directory tree, count files/sizes)
+3. Or wire to Ichor graph data (already done for KnowledgeGraph in T21 — apply same approach to metrics)
+
+**🚦 QA Gate B6:**
+```
+- [ ] Stream no longer appears in sidebar
+- [ ] Settings → Stream tab shows accurate metrics
+- [ ] Entity count matches actual Athenaeum content
+- [ ] Storage size reflects real disk usage
+- [ ] Source count is accurate
+```
+
+---
+
+### B7 — Admin Panel: Navigation reorganization
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 |
+| **Depends on** | Nothing |
+| **Files** | `Sidebar.tsx` |
+
+**Issues from user:**
+1. Admin shield should be ABOVE Profile/Settings at bottom (not under Tools)
+2. Kanban Board should be under Tools in sidebar (not in Admin)
+3. Tasks should be under Tools in sidebar (not in Admin)
+4. Gods tab in Admin is a stub — management is in GodPicker → remove or repurpose
+5. Export tab is a stub — needs definition (deferred)
+
+**Fix:**
+1. Move Admin shield to bottom cluster: `spacer → Admin → Settings gear → Profile`
+2. Move Kanban from Admin tab to Tools submenu with onClick opening KanbanPanel as surface
+3. Move Tasks from Admin tab to Tools submenu
+4. Remove "Gods Management" stub tab from Admin
+5. Leave Export as stub with placeholder for now
+
+**🚦 QA Gate B7:**
+```
+- [ ] Admin shield is at bottom of sidebar, above Settings gear
+- [ ] Kanban Board appears under Tools in sidebar
+- [ ] Click Kanban Board → opens Kanban board (not Admin panel)
+- [ ] Tasks appears under Tools in sidebar
+- [ ] Click Tasks → opens Tasks panel
+- [ ] Gods tab removed from Admin
+- [ ] Zero console errors
+```
+
+---
+
+### B8 — Admin Panel: Feature gaps
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 |
+| **Depends on** | B7 |
+| **Files** | `PluginsPanel.tsx`, `SkillsPanel.tsx`, `CronJobsPanel.tsx`, `HealthPanel.tsx`, `routes.py` |
+
+**Issues:**
+1. **Plugins** — displays list but no enable/disable toggle
+2. **Skills** — displays list but no enable/disable/remove, doesn't show enabled state
+3. **System Cron** — good health check but no per-job toggle, no way to create new cron jobs
+4. **Health** — not showing accurate data, missing system stats (memory, storage, CPU)
+5. **Feature Flags** — global only, should support per-user/role assignment (deferred to post-refactor)
+
+**Fix (now):**
+1. Add toggle switches to Plugins panel (PATCH `/api/plugins/{name}` with `enabled: true/false`)
+2. Add toggle + remove to Skills panel (needs backend routes for skill enable/disable/remove)
+3. Add per-job toggle to System Cron panel
+4. Add system stats to Health panel (memory, disk, CPU via `/api/system/health` which already exists)
+
+**Fix (deferred to Tier 7):**
+5. Per-user/role feature flags — requires auth system restructure
+
+**🚦 QA Gate B8:**
+```
+- [ ] Plugins: toggle OFF → plugin disabled, toggle ON → enabled
+- [ ] Skills: toggle OFF → skill hidden, toggle ON → visible
+- [ ] Skills: remove button deletes skill
+- [ ] System Cron: each job has ON/OFF toggle
+- [ ] Health: shows memory usage (used/total), disk usage, CPU load
+- [ ] Health: data is accurate (matches `free -h`, `df -h`)
+```
+
+---
+
+### B9 — Settings Panel: Remove redundant tabs
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 |
+| **Depends on** | Nothing |
+| **Files** | `SettingsRoot.tsx` |
+
+**Issues:**
+1. **Profile tab** — redundant (sidebar Profile button exists)
+2. **Notifications tab** — redundant (bell icon exists)
+3. **Language tab** — unnecessary (English only)
+4. **User Cron** — should show user-specific cron jobs (currently may show nothing)
+
+**Fix:**
+1. Remove Profile, Notifications, Language tabs from Settings
+2. Keep: Appearance/Theme, Integrations, Stream (from B6), User Cron
+3. Fix User Cron to filter by user
+
+**🚦 QA Gate B9:**
+```
+- [ ] Settings opens with: Appearance, Integrations, Stream, User Cron tabs
+- [ ] Profile tab removed
+- [ ] Notifications tab removed
+- [ ] Language tab removed
+- [ ] User Cron shows jobs for current user
+```
+
+---
+
+### B10 — Integrations: "Connection service not reachable"
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 |
+| **Depends on** | n8n Docker running |
+| **Files** | `ConnectionManager.tsx`, `n8n_client.py`, Docker |
+
+**Likely root cause:** n8n Docker container is not running. The code layers exist (n8n_client.py, frontend hooks) but the container has been lost before.
+
+**Fix:**
+1. Check `docker ps | grep n8n`
+2. Restart if needed: `docker start n8n`
+3. If container doesn't exist, recreate from documented setup
+4. Verify: `curl http://localhost:5678/healthz`
+
+**🚦 QA Gate B10:**
+```
+- [ ] Settings → Integrations shows provider cards
+- [ ] Connected providers show green status
+- [ ] Connect button works (opens n8n OAuth flow)
+- [ ] Disconnect works
+- [ ] No "Connection service not reachable" error
+```
+
+---
+
+### B11 — Appearance/Theme: Clean up
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P2 |
+| **Depends on** | Nothing |
+| **Files** | `AppearanceTab.tsx`, `theme-store.ts` |
+
+**Issues:**
+1. Should only offer "Olympus Dark" as the current and only theme
+2. Add terminology changer (term → custom label mapping from theme YAML)
+3. Light theme is low priority — just a recolor, defer
+
+**Fix:**
+1. Remove theme selector (only one theme exists)
+2. Expose terminology customizer from `olympus-theme.yaml`
+3. Show current theme preview
+
+**🚦 QA Gate B11:**
+```
+- [ ] Appearance tab shows "Olympus Dark" as active theme
+- [ ] No theme selector dropdown (single theme)
+- [ ] Terminology editor: change "Athenaeum" → "Library" → reflected in UI
+- [ ] Changes persist across refresh
+```
+
+---
+
+### B12 — Dashboard: Stale data + missing refresh
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P2 |
+| **Depends on** | Nothing |
+| **Files** | `DashboardPanel.tsx`, `use-insights.ts` |
+
+**Issue:** Dashboard not updating, no manual refresh button.
+
+**Fix:** Add refresh button + auto-refresh interval (30s). Ensure data comes from live API endpoints.
+
+**🚦 QA Gate B12:**
+```
+- [ ] Dashboard shows current data on load
+- [ ] Refresh button fetches new data
+- [ ] Auto-refreshes every 30s
+- [ ] Token usage, costs, model breakdown show real data
+```
+
+---
+
+### B13 — Provider/API Key Management (Missing from Admin)
+
+| Field | Value |
+|---|---|
+| **Status** | 🔲 |
+| **Priority** | P1 |
+| **Depends on** | Nothing |
+| **Files** | `ProvidersPanel.tsx`, `routes.py` |
+
+**Issue:** No way to manage providers and API keys/OAuth from Admin. Should mirror Hermes Dashboard (:9119) functionality.
+
+**Fix:** Build provider management panel: list configured providers, add/edit/remove API keys, OAuth connection status. Wire to existing Hermes API endpoints.
+
+**🚦 QA Gate B13:**
+```
+- [ ] Admin → Providers shows all configured providers
+- [ ] Add API key for a provider
+- [ ] Remove API key
+- [ ] OAuth providers show connection status
+- [ ] Mirrors Hermes Dashboard functionality
+```
+
+---
+
+## V3.1 Summary
+
+| Category | Tasks | Status |
+|---|---|---|
+| **Blockers** (B1–B5) | 5 | 🔲 0/5 |
+| **Major Fixes** (B6–B10) | 5 | 🔲 0/5 |
+| **Polish** (B11–B13) | 3 | 🔲 0/3 |
+| **Total** | **13** | **🔲 0/13** |
+
+---
+
+## Post-Ship: Tier 7 — Backend Refactor (T25–T28)
+
+> Unchanged from V3 plan. Runs on port 8788 beside live 8787. No downtime.
+> Status: 🔲 0/4
+
+---
+
+## Archive: Phase 1 — Complete ✅ (41/41)
+
+All V3 build phases (Tiers 0–6, Streams A–D) are complete. See git history and the section below for task-level detail. Archived 2026-06-01.
 
 ---
 
@@ -1488,7 +1900,15 @@ Each concern gets one owner:
 
 ## Current Status Summary
 
-|> Updated: 2026-06-01 — Phase 1 complete (41/41). T22-T24 all built. |
+|> Updated: 2026-06-01 — V3.1 Bug Squash active (0/13). Phase 1 complete (41/41). |
+
+| Phase | Tasks | Status |
+|---|---|---|
+| **V3.1 Bug Squash** (B1–B13) | 0/13 | 🔲 Active — blockers first |
+| **Phase 1 — V3 Build** (Tiers 0–6, Streams A–D) | 41/41 | ✅ Complete |
+| **Tier 7 — Backend Refactor** (T25–T28) | 0/4 | 🔲 Post-ship |
+
+**Priority order for V3.1:** B1 → B5 → B2 → B3 → B4 (blockers), then B7 → B6 → B8 → B9 → B10 → B13 → B11 → B12
 
 | Stream / Tier | Tasks | Status |
 |---------------|-------|--------|
