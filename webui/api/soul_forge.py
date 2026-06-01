@@ -149,7 +149,7 @@ A personal multi-agent AI system...
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _get_client() -> OpenAI:
-    return OpenAI(base_url=_BASE_URL, api_key=_API_KEY)
+    return OpenAI(base_url=_BASE_URL, api_key=_API_KEY, timeout=60)
 
 
 def _clean_expired_sessions() -> None:
