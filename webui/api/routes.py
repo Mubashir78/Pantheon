@@ -7143,6 +7143,57 @@ def handle_post(handler, parsed) -> bool:
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
 
+    # ── User CRUD (Admin) ──
+
+    if parsed.path == "/api/users":
+        # Create user (admin+). Verify auth first.
+        from api.olympus_users import create_user as _olympus_create
+        from api.olympus_users import get_session_user as _olympus_sess
+        from api.olympus_users import get_user as _olympus_get
+        from api.auth import parse_cookie as _pc, verify_session as _vs
+
+        # Resolve the authenticated user
+        acting_user = None
+        cookie_val = _pc(handler)
+        token = None
+        if cookie_val and _vs(cookie_val):
+            token = cookie_val
+        auth_header = handler.headers.get("Authorization", "")
+        if not token and auth_header.startswith("Bearer "):
+            t = auth_header[7:]
+            if _vs(t):
+                token = t
+        if token:
+            token_part = token.split(".")[0] if "." in token else token
+            uid = _olympus_sess(token_part)
+            if uid:
+                acting_user = _olympus_get(uid)
+
+        if not acting_user:
+            return j(handler, {"error": "Authentication required"}, status=401)
+
+        role = body.get("role", "user")
+        if role not in ("user", "power_user", "admin", "owner"):
+            return bad(handler, f"Invalid role: {role}", 400)
+
+        username = body.get("username", "").strip()
+        password = body.get("password", "")
+        display_name = body.get("display_name", "").strip()
+
+        if not username or not password:
+            return bad(handler, "username and password are required", 400)
+
+        try:
+            user = _olympus_create(username, password, role, acting_user["role"])
+            if display_name:
+                from api.olympus_users import update_user as _olympus_update
+                user = _olympus_update(user["id"], {"display_name": display_name}, acting_user["role"])
+            return j(handler, {"user": user})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except PermissionError as e:
+            return bad(handler, str(e), 403)
+
     # ── Checkpoints / Rollback (POST) ──
     if parsed.path == "/api/rollback/restore":
         if not body:
@@ -7848,7 +7899,7 @@ def handle_patch(handler, parsed) -> bool:
             return j(handler, {"error": "User not found"}, status=404)
 
         # Apply allowed profile updates
-        allowed = {"display_name", "color", "avatar"}
+        allowed = {"display_name", "color", "avatar", "password"}
         updates = {k: v for k, v in body.items() if k in allowed and v is not None}
         if updates:
             try:
@@ -7860,6 +7911,47 @@ def handle_patch(handler, parsed) -> bool:
         from api.olympus_users import build_bootstrap
         updated = get_user(uid)
         return j(handler, build_bootstrap(updated) if updated else build_bootstrap(user))
+
+    # ── PATCH /api/users/{id} — admin user edit ──
+    if parsed.path.startswith("/api/users/"):
+        from api.auth import parse_cookie, verify_session
+        from api.olympus_users import get_session_user, get_user, update_user
+
+        # Auth check — same pattern as /api/auth/me
+        session_val = None
+        cookie_val = parse_cookie(handler)
+        if cookie_val and verify_session(cookie_val):
+            session_val = cookie_val
+        auth_header = handler.headers.get("Authorization", "")
+        if not session_val and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if verify_session(token):
+                session_val = token
+        if not session_val:
+            return j(handler, {"error": "Authentication required"}, status=401)
+
+        token_part = session_val.split(".")[0] if "." in session_val else session_val
+        acting_uid = get_session_user(token_part)
+        if not acting_uid:
+            return j(handler, {"error": "Session not found"}, status=401)
+        acting_user = get_user(acting_uid)
+        if not acting_user:
+            return j(handler, {"error": "User not found"}, status=404)
+
+        # Parse target user ID from path: /api/users/{id}
+        target_id = parsed.path.split("/")[-1]
+        if not target_id:
+            return bad(handler, "User ID required", 400)
+
+        try:
+            updated = update_user(target_id, body, acting_role=acting_user.get("role", "user"))
+            from api.olympus_users import build_bootstrap
+            user = get_user(target_id) or updated
+            return j(handler, {"user": user})
+        except ValueError as e:
+            return j(handler, {"error": str(e)}, status=400)
+        except PermissionError as e:
+            return j(handler, {"error": str(e)}, status=403)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -7997,6 +8089,43 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+
+    # ── User Delete (DELETE) — soft-delete a user ──
+    if parsed.path.startswith("/api/users/"):
+        from api.auth import parse_cookie, verify_session
+        from api.olympus_users import get_session_user, get_user, delete_user
+
+        session_val = None
+        cookie_val = parse_cookie(handler)
+        if cookie_val and verify_session(cookie_val):
+            session_val = cookie_val
+        auth_header = handler.headers.get("Authorization", "")
+        if not session_val and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if verify_session(token):
+                session_val = token
+        if not session_val:
+            return j(handler, {"error": "Authentication required"}, status=401)
+
+        token_part = session_val.split(".")[0] if "." in session_val else session_val
+        acting_uid = get_session_user(token_part)
+        if not acting_uid:
+            return j(handler, {"error": "Session not found"}, status=401)
+        acting_user = get_user(acting_uid)
+        if not acting_user:
+            return j(handler, {"error": "User not found"}, status=404)
+
+        target_id = parsed.path.split("/")[-1]
+        if not target_id:
+            return bad(handler, "User ID required", 400)
+
+        try:
+            delete_user(target_id, acting_user.get("role", "user"))
+            return j(handler, {"ok": True})
+        except ValueError as e:
+            return j(handler, {"error": str(e)}, status=400)
+        except PermissionError as e:
+            return j(handler, {"error": str(e)}, status=403)
 
     # ── n8n Credential Delete (DELETE) — disconnect a provider ──
     if parsed.path.startswith("/api/n8n/credentials/") and not parsed.path.endswith("/connect"):
