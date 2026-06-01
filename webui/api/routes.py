@@ -9718,6 +9718,42 @@ def _prepare_chat_start_session_for_stream(
     s.save()
 
 
+def _get_olympus_user_from_handler(handler) -> dict | None:
+    """Resolve the Olympus user from the handler's auth cookie or Bearer token.
+
+    Returns the user dict if found (including 'permitted_gods'), or None if
+    Olympus multi-user auth isn't active or the session token can't be resolved.
+    """
+    try:
+        from api.auth import parse_cookie, verify_session
+        from api.olympus_users import get_session_user, get_user
+    except ImportError as e:
+        return None
+
+    # Try cookie first, then Bearer token
+    session_val = None
+    cookie_val = parse_cookie(handler)
+    if cookie_val and verify_session(cookie_val):
+        session_val = cookie_val
+
+    if not session_val:
+        auth_header = handler.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if verify_session(token):
+                session_val = token
+
+    if not session_val:
+        return None
+
+    token_part = session_val.split(".")[0] if "." in session_val else session_val
+    uid = get_session_user(token_part)
+    if not uid:
+        return None
+
+    return get_user(uid)
+
+
 def _handle_chat_start(handler, body):
     try:
         require(body, "session_id")
@@ -9780,6 +9816,27 @@ def _handle_chat_start(handler, body):
             # currently-selected profile instead of the stale one stamped at
             # creation time.
             s.profile = requested_profile
+
+    # ── Olympus multi-user: enforce permitted_gods ──────────────────────
+    user = _get_olympus_user_from_handler(handler)
+    if user:
+        effective_profile = requested_profile or getattr(s, "profile", None) or "default"
+        perm = user.get("permitted_gods")
+        if perm is not None:
+            # None = owner (all gods allowed). List = explicit allowlist.
+            if not isinstance(perm, list):
+                perm = []
+            if effective_profile not in perm and effective_profile != "default":
+                logger.warning(
+                    "User '%s' blocked from god '%s' (permitted=%s)",
+                    user.get("username"), effective_profile, perm,
+                )
+                return j(
+                    handler,
+                    {"error": f"Access denied: god '{effective_profile}' is not in your permitted gods"},
+                    status=403,
+                )
+
     msg = str(body.get("message", "")).strip()
     if not msg:
         return bad(handler, "message is required")
@@ -9883,6 +9940,26 @@ def _normalize_chat_attachments(raw_attachments):
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     s = get_session(body["session_id"])
+
+    # ── Olympus multi-user: enforce permitted_gods ──────────────────────
+    user = _get_olympus_user_from_handler(handler)
+    if user:
+        effective_profile = getattr(s, "profile", None) or "default"
+        perm = user.get("permitted_gods")
+        if perm is not None:
+            if not isinstance(perm, list):
+                perm = []
+            if effective_profile not in perm and effective_profile != "default":
+                logger.warning(
+                    "User '%s' blocked from god '%s' (permitted=%s)",
+                    user.get("username"), effective_profile, perm,
+                )
+                return j(
+                    handler,
+                    {"error": f"Access denied: god '{effective_profile}' is not in your permitted gods"},
+                    status=403,
+                )
+
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)

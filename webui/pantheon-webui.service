@@ -6,12 +6,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/pantheon/webui/server.py
-WorkingDirectory=%h/pantheon/webui
+User=konan
+ExecStart=/home/konan/.hermes/hermes-agent/venv/bin/python3 /home/konan/pantheon/webui/server.py
+WorkingDirectory=/home/konan/pantheon/webui
 Restart=always
 RestartSec=5
 
-# ── React UI ────────────────────────────────────────────────────────────────\n# Serve the new React UI (hermes-ui.html) instead of the default index.\nEnvironment=HERMES_WEBUI_INDEX=hermes-ui.html\n\n# ── Network ────────────────────────────────────────────────────────────────\n# Bind to all interfaces (0.0.0.0) to access from other devices on the LAN\n# or via Tailscale/WireGuard. Loopback (127.0.0.1) is the safe default when\n# you only need local access.\nEnvironment=HERMES_WEBUI_HOST=0.0.0.0\nEnvironment=HERMES_WEBUI_PORT=8787\n\n# ── State directory (sessions, settings, workspaces) ──────────────────────\n# Defaults to ~/.hermes/webui — only set this to redirect elsewhere.\n# Environment=HERMES_WEBUI_STATE_DIR=%h/.hermes/webui
+# ── React UI ────────────────────────────────────────────────────
+# Serve the new React UI (hermes-ui.html) instead of the default index.
+Environment=HERMES_WEBUI_INDEX=hermes-ui.html
+
+# ── Network ─────────────────────────────────────────────────────
+# Bind to all interfaces so Tailscale can reach it.
+Environment=HERMES_WEBUI_HOST=0.0.0.0
+Environment=HERMES_WEBUI_PORT=8787
 
 [Install]
 WantedBy=default.target
