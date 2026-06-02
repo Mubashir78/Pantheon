@@ -17,7 +17,6 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 # ── R19: get_hermes_home_for_profile ─────────────────────────────────────────

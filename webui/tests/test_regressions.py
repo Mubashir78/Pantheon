@@ -7,7 +7,6 @@ Each test is tagged with the sprint/commit where the bug was found and fixed.
 import json
 import os
 import pathlib
-import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -208,7 +207,7 @@ def test_all_api_modules_importable(cleanup_test_sessions):
     """All api/ modules must be importable without NameError or ImportError.
     Catches missing imports introduced during future module splits.
     """
-    import ast, pathlib
+    import ast
     api_dir = REPO_ROOT / "api"
     for module_file in api_dir.glob("*.py"):
         src = module_file.read_text()
@@ -220,7 +219,7 @@ def test_all_api_modules_importable(cleanup_test_sessions):
 
 def test_server_py_importable(cleanup_test_sessions):
     """server.py must parse without syntax errors after any split."""
-    import ast, pathlib
+    import ast
     src = (REPO_ROOT / "server.py").read_text()
     try:
         ast.parse(src)

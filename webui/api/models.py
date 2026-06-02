@@ -1,5 +1,4 @@
 """Hermes Web UI -- Session model and in-memory session store."""
-import collections
 import datetime
 import hashlib
 import json
@@ -11,7 +10,6 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,

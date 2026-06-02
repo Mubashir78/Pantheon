@@ -7,13 +7,12 @@ created by the Hermes agent's CheckpointManager.  Checkpoints live at
 """
 
 import hashlib
-import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 

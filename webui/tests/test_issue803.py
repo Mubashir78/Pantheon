@@ -15,10 +15,8 @@ Covers:
 """
 import os
 import threading
-from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 
 # ── 1. Cookie build/parse roundtrip ──────────────────────────────────────────

@@ -10,8 +10,6 @@ Covers all five new functions added to api/streaming.py:
 import sys
 import os
 import threading
-import types
-import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest

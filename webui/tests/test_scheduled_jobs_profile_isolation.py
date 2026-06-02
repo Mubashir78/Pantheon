@@ -14,7 +14,6 @@ import os
 import pathlib
 import sys
 import threading
-from unittest import mock
 
 import pytest
 

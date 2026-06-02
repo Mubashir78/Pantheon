@@ -15,15 +15,13 @@ All three fix the same "tokens-paid-for-data-loss" class of bug.
 
 import pathlib
 import queue
-import re
 import threading
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 import api.config as config
 import api.models as models
-import api.streaming as streaming
 from api.models import Session
 from api.streaming import cancel_stream
 

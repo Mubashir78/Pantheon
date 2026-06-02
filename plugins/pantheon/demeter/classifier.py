@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import yaml
 
@@ -269,7 +269,6 @@ def classify_content(content: str, filename: str = "") -> Tuple[Optional[str], b
         If the LLM thinks no existing Codex fits, it may return
         (SUGGESTED_CODEX_NAME, True) to suggest a new one.
     """
-    import json
     import httpx
 
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")

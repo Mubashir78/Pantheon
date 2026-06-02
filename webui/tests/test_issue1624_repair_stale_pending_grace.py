@@ -15,10 +15,7 @@ treated as "old enough" to preserve current legacy-data recovery semantics.
 """
 
 import time
-import threading
-from unittest.mock import patch
 
-import pytest
 
 
 # ── _repair_stale_pending grace guard ───────────────────────────────────

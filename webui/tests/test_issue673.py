@@ -14,7 +14,6 @@ Covers:
 
 import json
 import pathlib
-import re
 import unittest
 import urllib.error
 import urllib.request

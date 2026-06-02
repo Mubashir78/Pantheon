@@ -13,7 +13,6 @@ Schema: {gods: {god_id: {display_name, role, description, capabilities, status}}
 
 import os
 import sys
-from pathlib import Path
 
 import yaml
 

@@ -26,7 +26,6 @@ The v0.50.255 batch (#1390 + #1405) had four Opus advisor findings:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest

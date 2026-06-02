@@ -19,10 +19,9 @@ import json
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # Ensure we can import heartbeat.py from the same directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import signal
-import sys
 import time
 
 from mcp.server.fastmcp import FastMCP

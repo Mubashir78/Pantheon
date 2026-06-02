@@ -6,7 +6,6 @@ need to prevent the UI getting stuck in "Thinking…" during dangerous commands.
 """
 
 import json
-import threading
 import uuid
 import urllib.request
 import urllib.error

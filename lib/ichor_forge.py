@@ -33,8 +33,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Counter, Dict, List, Optional, Tuple
+from typing import Any, Counter, Dict, List
 
 logger = logging.getLogger("ichor_forge")
 
@@ -535,9 +534,6 @@ class ForgeSmith:
         """
         from lib.ichor_gates import (
             INTENT_INJECTION_RULES,
-            PHASE_KEYWORDS,
-            PHASE_TOOLS,
-            RALPHPhase,
         )
 
         result = {

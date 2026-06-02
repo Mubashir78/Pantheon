@@ -10,11 +10,10 @@ labels each decision with the originating user.
 TODO: Disable this cron job when the auto-inject plugin is ready.
 """
 
-import os
 import re
 import time
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 SHARED = Path.home() / "pantheon" / "shared"
 DECISIONS_ROOT = SHARED / "decisions"

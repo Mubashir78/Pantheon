@@ -1,6 +1,6 @@
 import pytest
 from harness.loader import load_harness, invalidate_all
-from harness.exceptions import HarnessCircularExtendsError, HarnessNotFoundError
+from harness.exceptions import HarnessNotFoundError
 
 
 @pytest.fixture(autouse=True)

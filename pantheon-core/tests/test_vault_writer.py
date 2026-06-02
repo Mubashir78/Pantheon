@@ -1,7 +1,5 @@
-import os
 from pathlib import Path
 import tempfile
-import pytest
 
 from sanctuary.config import SanctuaryConfig, VaultLogging, SanctuaryUI
 from vault.writer import VaultWriter

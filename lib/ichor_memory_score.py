@@ -9,9 +9,6 @@ These change over time through access, updates, decay, and contradiction.
 
 import sqlite3
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger("ichor_memory_score")
 

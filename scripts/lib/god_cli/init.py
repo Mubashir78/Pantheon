@@ -22,7 +22,6 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 from . import defaults
 from . import template_engine
@@ -33,7 +32,6 @@ sys.path.insert(0, os.path.join(defaults.PANTHEON_DIR, "scripts", "lib"))
 from pantheon_sdk import (
     registry_add as sdk_registry_add,
     log_vault_entry,
-    print_header,
 )
 
 

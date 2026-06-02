@@ -35,7 +35,6 @@ _needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed —
 
 def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool = False):
     """Call get_onboarding_status() with a controlled filesystem + settings."""
-    import importlib
 
     # Import fresh copies each call so module-level state doesn't bleed across
     import api.onboarding as mod

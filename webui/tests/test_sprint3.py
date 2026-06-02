@@ -1,5 +1,5 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
-import json, uuid, urllib.request, urllib.error
+import json, urllib.request, urllib.error
 
 from tests._pytest_port import BASE
 

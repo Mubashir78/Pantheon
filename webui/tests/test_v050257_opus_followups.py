@@ -34,10 +34,8 @@ from __future__ import annotations
 import os
 import stat
 import sys
-import tempfile
 from pathlib import Path
 
-import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 

@@ -14,13 +14,11 @@ import json
 import logging
 import os
 import random
-import sys
 import time
-from copy import deepcopy
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger("forge_sweep")

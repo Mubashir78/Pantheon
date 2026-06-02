@@ -1,7 +1,7 @@
 """
 Sprint 12 Tests: settings panel, session pinning, session import, SSE reconnect.
 """
-import json, pathlib, urllib.error, urllib.request, urllib.parse
+import json, urllib.error, urllib.request, urllib.parse
 
 from tests._pytest_port import BASE, TEST_DEFAULT_MODEL
 

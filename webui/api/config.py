@@ -18,10 +18,8 @@ import queue
 import sys
 import threading
 import time
-import traceback
-import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 HOME = Path.home()

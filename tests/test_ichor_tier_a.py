@@ -4,12 +4,10 @@ Tests pattern matching, confidence scoring, dedup, edge cases,
 storage, and real conversation extraction.
 """
 
-import json
 import os
 import tempfile
 import pytest
 
-from lib.ichor_db import IchorDB
 from lib.ichor_tier_a import TierAExtractor, CONFIDENCE_FLOOR
 from lib.ichor_patterns import ALL_TYPES, pattern_count, type_pattern_counts
 

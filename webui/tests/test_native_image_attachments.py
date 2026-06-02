@@ -7,11 +7,9 @@ fallback cases the maintainer asked about.
 """
 import base64
 import os
-import struct
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import pytest
 
 from api.streaming import (
     _attachment_name,

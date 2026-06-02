@@ -11,7 +11,6 @@ Usage:
     python3 scripts/embed-catchup.py --quick             # Raw files only (skip distilled/sessions/archive)
 """
 
-import json
 import logging
 import os
 import sys

@@ -17,10 +17,9 @@ import shutil
 import sqlite3
 import sys
 import time
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
 

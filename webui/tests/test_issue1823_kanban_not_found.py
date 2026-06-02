@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from api import routes

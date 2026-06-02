@@ -14,11 +14,10 @@ Fixes:
   5. static/i18n.js: new i18n keys for config_yaml and not_configured hints
 """
 
-import re
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 

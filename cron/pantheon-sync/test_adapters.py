@@ -1,7 +1,6 @@
 """Tests for Pantheon sync adapters."""
 
 import sys
-import pytest
 
 sys.path.insert(0, ".")
 from adapters import list_adapters, get_adapter

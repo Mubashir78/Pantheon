@@ -16,7 +16,6 @@ Fix:
   suppresses the link rather than emitting a known-broken URL.
 """
 
-import os
 import re
 import subprocess
 import sys

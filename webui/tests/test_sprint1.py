@@ -14,14 +14,12 @@ No mocking required for session CRUD, upload parser, or approval API.
 
 import io
 import json
-import os
 import sys
 import time
 import uuid
 import urllib.request
 import urllib.parse
 import urllib.error
-import tempfile
 import pathlib
 
 # Allow importing server modules directly for unit tests

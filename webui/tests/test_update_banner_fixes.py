@@ -14,9 +14,7 @@ Covers:
 
 import pathlib
 import re
-import threading
 import time
-import sys
 import os
 
 REPO = pathlib.Path(__file__).parent.parent

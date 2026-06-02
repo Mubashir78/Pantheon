@@ -9,7 +9,6 @@ Covers:
 import os
 import queue
 import threading
-import textwrap
 
 import pytest
 

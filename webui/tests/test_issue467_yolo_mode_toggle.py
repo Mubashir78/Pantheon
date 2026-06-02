@@ -12,7 +12,6 @@ Covers:
 import os
 import re
 import json
-import pathlib
 import pytest
 
 from tests.conftest import requires_agent_modules

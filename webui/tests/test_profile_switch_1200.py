@@ -11,9 +11,6 @@ Bug 2: /api/models returned stale results after a profile switch because the
 These tests verify both fixes.
 """
 import os
-import json
-import tempfile
-import textwrap
 from pathlib import Path
 
 
@@ -203,7 +200,6 @@ no active session), the early-return branch ran without updating the chip.
 This caused the chip to keep showing the old profile name after switchToProfile().
 """
 
-import re
 
 
 def test_syncTopbar_early_return_updates_profile_chip():

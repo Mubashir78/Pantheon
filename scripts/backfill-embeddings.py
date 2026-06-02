@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Dead-simple backfill: embed Athenaeum → ChromaDB via Ollama."""
-import os, sys, time
+import time
 from pathlib import Path
 
 def say(msg):

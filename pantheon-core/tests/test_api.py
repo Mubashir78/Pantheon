@@ -1,7 +1,5 @@
 import os
 from pathlib import Path
-import tempfile
-import pytest
 from fastapi.testclient import TestClient
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -10,8 +8,6 @@ os.environ["PANTHEON_SANCTUARIES_DIR"] = str(FIXTURES_DIR / "sanctuaries")
 os.environ["PANTHEON_HARNESS_DIR"] = str(FIXTURES_DIR / "harnesses")
 
 # Must import after env vars are set
-import importlib
-import api as api_module
 from api import app
 
 client = TestClient(app)

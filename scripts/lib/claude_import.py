@@ -1,14 +1,10 @@
 """
 Claude Import — shared helpers for the pantheon-import-claude tool.
 """
-import json
 import os
 import re
-import shutil
 import sys
-import zipfile
 from datetime import datetime
-from pathlib import Path
 
 # ── Paths (same pattern as pantheon_sdk.py) ──────────────────────────
 

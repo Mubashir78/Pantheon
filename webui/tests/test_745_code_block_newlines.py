@@ -6,9 +6,7 @@ Root cause: the paragraph-splitter in renderMd() replaced \n with <br> inside
 text. The fix stashes <pre> blocks (and pre-header divs, mermaid, katex) before
 the paragraph split and restores them afterwards.
 """
-import re
 import subprocess
-import sys
 import os
 
 UI_JS = os.path.join(os.path.dirname(__file__), '..', 'static', 'ui.js')

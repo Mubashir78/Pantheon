@@ -16,10 +16,8 @@ Usage:
     # → "google/gemma-4-26b-a4b-it:free" (or whatever is best today)
 """
 
-import json
 import logging
 import os
-import time
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("model_router")

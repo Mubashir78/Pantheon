@@ -560,11 +560,7 @@ from api.config import (
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
-    IMAGE_EXTS,
-    MD_EXTS,
     MIME_MAP,
-    MAX_FILE_BYTES,
-    MAX_UPLOAD_BYTES,
     CHAT_LOCK,
     _get_session_agent_lock,
     SESSION_AGENT_LOCKS,
@@ -1867,7 +1863,6 @@ from api.models import (
     new_session,
     all_sessions,
     title_from,
-    _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -1886,12 +1881,10 @@ from api.workspace import (
     list_dir,
     list_workspace_suggestions,
     read_file_content,
-    safe_resolve_ws,
     resolve_trusted_workspace,
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
-    _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
@@ -3397,7 +3390,6 @@ a:hover{{text-decoration:underline}}
     if parsed.path == "/api/auth/me":
         from api.olympus_users import build_bootstrap
         from api.auth import parse_cookie, verify_session
-        from api.config import HOST
 
         session_val = None
         cookie_val = parse_cookie(handler)
@@ -6280,7 +6272,7 @@ def handle_post(handler, parsed) -> bool:
         tarball_b64 = base64.b64encode(tarball_buf.getvalue()).decode("ascii")
 
         # Build an escaped JSON string for gh CLI
-        import subprocess, shlex
+        import subprocess
 
         SUMMONS_REPO = "Duskript/Pantheon-Summons"
         branch = f"summon/{god_name}"
@@ -7146,7 +7138,7 @@ def handle_post(handler, parsed) -> bool:
             )
 
         # Try multi-user auth (Olympus) first
-        from api.olympus_users import list_users as _olympus_list_users, _get_data as _olympus_get_data
+        from api.olympus_users import _get_data as _olympus_get_data
         multi_user_active = bool(_olympus_get_data().get("users", []))
 
         if multi_user_active:
@@ -7665,7 +7657,6 @@ def handle_post(handler, parsed) -> bool:
         god_icon = data.get("icon", "")
         if god_name and not god_icon:
             try:
-                from api.helpers import _safe_first
                 from api.profiles import list_profiles_api
                 profiles = list_profiles_api()
                 for p in profiles:

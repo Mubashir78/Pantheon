@@ -9,7 +9,6 @@ Responsibilities:
 - validate_no_unsubstituted_vars(rendered) — warns about $VAR left behind
 """
 
-import os
 import re
 import sys
 from pathlib import Path

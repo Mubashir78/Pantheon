@@ -6,7 +6,6 @@ Usage:
     python3 scripts/embed-distilled-catchup.py --dry-run     # Just report
 """
 
-import json
 import logging
 import os
 import sys

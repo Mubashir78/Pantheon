@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import socket
-import subprocess
 import sys
 import threading
 import urllib.error
@@ -1799,8 +1798,6 @@ def setup_n8n() -> dict:
         dict with keys: ok, n8n_url, api_key, tailscale_url (or error)
     """
     import json as _json
-    import os as _os
-    import subprocess as _sp
     import time as _time
     import urllib.error as _urlerr
     import urllib.request as _urlreq

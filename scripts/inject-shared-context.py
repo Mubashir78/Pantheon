@@ -10,11 +10,8 @@ Multi-user ready: iterates all user subdirs in decisions/.
 Single-user today (user=konan) — just works.
 """
 
-import json
 import os
-import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 SHARED_DIR = Path.home() / "pantheon" / "shared"

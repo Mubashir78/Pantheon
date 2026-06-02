@@ -2,7 +2,6 @@
 """Standalone Demeter inbox watcher — bypasses pantheon plugin init."""
 
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -42,8 +41,6 @@ DelWatcher = _MODULES["demeter.watcher"].DemeterWatcher
 
 
 def main():
-    import json
-    from datetime import datetime, timezone
 
     inbox = str(Path.home() / "Staging" / "inbox")
     Path(inbox).mkdir(parents=True, exist_ok=True)

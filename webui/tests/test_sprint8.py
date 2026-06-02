@@ -1,7 +1,7 @@
 """
 Sprint 8 Tests: Edit/regenerate, clear conversation, truncate, reconnect banner fix, syntax highlight.
 """
-import json, pathlib, urllib.error, urllib.parse, urllib.request
+import json, urllib.error, urllib.parse, urllib.request
 
 from tests._pytest_port import BASE
 

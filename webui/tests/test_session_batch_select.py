@@ -1,5 +1,4 @@
 """Test: session batch select mode functions exist in sessions.js (#568)"""
-import re
 
 
 def test_batch_select_state_variables():

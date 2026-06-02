@@ -1,5 +1,5 @@
 """Sprint 2 tests: image preview, file types, markdown. Uses cleanup_test_sessions fixture."""
-import io, json, uuid, urllib.request, urllib.error, pathlib
+import json, urllib.request, urllib.error
 
 from tests._pytest_port import BASE
 

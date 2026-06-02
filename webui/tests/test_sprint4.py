@@ -1,5 +1,5 @@
 """Sprint 4 tests: relocation, session rename, search, file ops, validation."""
-import json, pathlib, uuid, urllib.request, urllib.error
+import json, uuid, urllib.request, urllib.error
 
 from tests._pytest_port import BASE
 

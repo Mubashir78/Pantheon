@@ -8,7 +8,6 @@ import json
 import logging
 import mimetypes
 import os
-import queue
 import re
 import threading
 import time
@@ -22,8 +21,7 @@ logger = logging.getLogger(__name__)
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
-    LOCK, SESSIONS, SESSION_DIR,
-    _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    LOCK, SESSIONS, _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     model_with_provider_context,
@@ -218,7 +216,6 @@ def _aiagent_import_error_detail() -> str:
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
-from api.workspace import set_last_workspace
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only

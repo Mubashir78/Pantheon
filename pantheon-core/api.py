@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from sanctuary.config import load_all_sanctuaries, load_sanctuary, SanctuaryConfig
+from sanctuary.config import load_all_sanctuaries, load_sanctuary
 from harness.loader import load_harness
 from vault.writer import VaultWriter
 

@@ -300,7 +300,6 @@ def test_api_memory_redacts_via_write_read(test_server):
 
 def test_fix_credential_permissions_corrects_loose_files(tmp_path, monkeypatch):
     """fix_credential_permissions() tightens group/other read bits."""
-    import os
     from api.startup import fix_credential_permissions
 
     env_file = tmp_path / ".env"

@@ -14,10 +14,7 @@ Covers:
 """
 
 import json
-import os
 import pathlib
-import sys
-import unittest.mock
 import urllib.error
 import urllib.request
 

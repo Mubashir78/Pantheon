@@ -10,7 +10,6 @@ Tests are ordered TDD-style:
   6. Settings UI has renamed label
 """
 import json
-import os
 import pathlib
 import sqlite3
 import time
@@ -1919,7 +1918,6 @@ def test_probe_payload_when_watcher_thread_alive():
     t.start()
     w._thread = t
     # Thread may finish fast — loop-start a live daemon thread for reliability
-    import time as _time
     done = threading.Event()
     live = threading.Thread(target=done.wait, daemon=True)
     live.start()

@@ -9,12 +9,11 @@ Usage:
   python3 scripts/reembed-athenaeum.py --clean  # same as default
 """
 
-import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger("reembed")

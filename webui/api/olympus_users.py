@@ -17,7 +17,6 @@ import secrets
 import tempfile
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 from api.config import STATE_DIR

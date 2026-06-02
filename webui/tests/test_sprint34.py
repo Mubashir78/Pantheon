@@ -16,10 +16,7 @@ Covers:
 
 import json
 import pathlib
-import tempfile
-import unittest.mock
 
-import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
 from tests._pytest_port import BASE
@@ -269,7 +266,7 @@ class TestApplyOnboardingSetupUnsupportedProvider:
     """
 
     def _call(self, provider: str) -> dict:
-        import sys, pathlib, unittest.mock, tempfile, os
+        import sys, pathlib, unittest.mock, tempfile
         repo = pathlib.Path(__file__).parent.parent
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))

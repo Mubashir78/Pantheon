@@ -11,10 +11,7 @@ Covers:
 - Logging: at least 5 modules add a module-level logger (B110 remediation)
 - routes.py: session titles redacted in /api/sessions list response
 """
-import ast
 import pathlib
-import re
-import sys
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
