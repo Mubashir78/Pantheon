@@ -394,6 +394,7 @@ def _compress_tool_result(
     session_id: str = '',
     tool_call_id: str = '',
     duration_ms: int = 0,
+    god: str = '',
 ) -> str | None:
     """Apply all 10 compression rules and the output cap. Returns compressed string or None."""
     if not result or not isinstance(result, str):
@@ -427,6 +428,158 @@ def _compress_tool_result(
             "TokenJuice: %s — %d → %d chars (-%d%%, %d ms)",
             tool_name, before, after, pct, duration_ms or 0,
         )
+        # Persist stats for the UI dashboard. Best-effort — never let
+        # stats recording break compression.
+        try:
+            _record_stats(
+                tool_name=tool_name,
+                god=god or '',
+                session_id=session_id or '',
+                before=before,
+                after=after,
+                pct=pct,
+                duration_ms=duration_ms or 0,
+            )
+        except Exception:
+            logger.debug("TokenJuice: stats recording failed", exc_info=True)
         return result
 
     return None  # unchanged
+
+
+# ── Stats persistence ────────────────────────────────────────────────────────
+#
+# Per-call stats get appended to a JSONL file at
+# ~/.hermes/pantheon/tokenjuice-stats.jsonl. The /api/compression/stats
+# endpoint reads + aggregates this file. Best-effort — failures here
+# must never break the compression path above.
+
+import json
+import os as _os
+import time as _time
+from pathlib import Path as _Path
+
+_STATS_DIR = _Path(_os.environ.get("HERMES_HOME", str(_Path.home() / ".hermes"))) / "pantheon"
+_STATS_FILE = _STATS_DIR / "tokenjuice-stats.jsonl"
+_STATS_MAX_BYTES = 5 * 1024 * 1024  # 5MB; rotate past this
+
+
+def _record_stats(
+    tool_name: str,
+    god: str,
+    session_id: str,
+    before: int,
+    after: int,
+    pct: float,
+    duration_ms: int,
+) -> None:
+    """Append a single compression event to the stats JSONL file."""
+    try:
+        _STATS_DIR.mkdir(parents=True, exist_ok=True)
+        event = {
+            "ts": int(_time.time()),
+            "tool": tool_name,
+            "god": god,
+            "session": session_id,
+            "before": before,
+            "after": after,
+            "pct": pct,
+            "duration_ms": duration_ms,
+        }
+        line = json.dumps(event) + "\n"
+        # Atomic append; rotate if too large
+        if _STATS_FILE.exists() and _STATS_FILE.stat().st_size > _STATS_MAX_BYTES:
+            _rotate_stats()
+        with open(_STATS_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        # Stats are observability, never load-bearing
+        raise
+
+
+def _rotate_stats() -> None:
+    """Keep last ~50% of stats file when it grows past the cap."""
+    try:
+        if not _STATS_FILE.exists():
+            return
+        with open(_STATS_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        # Keep the second half
+        keep = lines[len(lines) // 2 :]
+        with open(_STATS_FILE, "w", encoding="utf-8") as f:
+            f.writelines(keep)
+    except Exception:
+        # If rotation fails, just truncate to avoid unbounded growth
+        try:
+            _STATS_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def read_stats(days: int = 7, god: str | None = None) -> dict:
+    """Aggregate compression stats for the last `days` days.
+
+    Returns a dict with:
+      - by_god: per-god {calls, before, after, saved_pct}
+      - total: aggregate {calls, before, after, saved_pct}
+      - per_day: list of {date, calls, saved_pct}
+    """
+    out = {
+        "total": {"calls": 0, "before": 0, "after": 0, "saved_pct": 0.0},
+        "by_god": {},
+        "per_day": {},
+        "days": days,
+    }
+    if not _STATS_FILE.exists():
+        return out
+    cutoff = int(_time.time()) - days * 86400
+    try:
+        with open(_STATS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("ts", 0) < cutoff:
+                    continue
+                if god and ev.get("god") != god:
+                    continue
+                tool = ev.get("tool", "?")
+                g = ev.get("god") or "(unknown)"
+                date_key = _time.strftime("%Y-%m-%d", _time.gmtime(ev.get("ts", 0)))
+                before = int(ev.get("before", 0))
+                after = int(ev.get("after", 0))
+                # Totals
+                out["total"]["calls"] += 1
+                out["total"]["before"] += before
+                out["total"]["after"] += after
+                # Per-god
+                bucket = out["by_god"].setdefault(
+                    g, {"calls": 0, "before": 0, "after": 0, "saved_pct": 0.0}
+                )
+                bucket["calls"] += 1
+                bucket["before"] += before
+                bucket["after"] += after
+                # Per-day
+                day = out["per_day"].setdefault(
+                    date_key, {"calls": 0, "before": 0, "after": 0, "saved_pct": 0.0}
+                )
+                day["calls"] += 1
+                day["before"] += before
+                day["after"] += after
+    except Exception as e:
+        logger.debug("TokenJuice: read_stats failed: %s", e)
+    # Compute saved_pct for each bucket
+    for bucket in (out["total"], *out["by_god"].values(), *out["per_day"].values()):
+        if bucket["before"] > 0:
+            bucket["saved_pct"] = round(
+                (1 - bucket["after"] / bucket["before"]) * 100, 1
+            )
+    # Convert per_day dict to sorted list
+    out["per_day"] = [
+        {"date": d, **v} for d, v in sorted(out["per_day"].items())
+    ]
+    return out

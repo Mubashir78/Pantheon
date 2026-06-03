@@ -2946,6 +2946,189 @@ def _handle_plugin_toggle(handler, parsed, body) -> bool:
     })
 
 
+# ─── TokenJuice endpoints (L5 from OLYMPUS_UI_ROADMAP) ─────────────────────
+#
+# Three HTTP endpoints let the Olympus UI surface the TokenJuice plugin:
+#   GET  /api/tokenjuice/config   — current config + which rules are active
+#   GET  /api/compression/stats   — aggregated savings, per-god and per-day
+#   PATCH /api/gods/<name>/compression  — toggle compression per god
+#
+# Per-god overrides live in the god's config.yaml under `plugins.tokenjuice`.
+# The plugin already reads this on load; we just add write-side plumbing.
+
+_TOKENJUICE_PLUGIN_PATH = os.path.expanduser("~/pantheon/plugins/tokenjuice")
+_COMPRESSION_RULE_NAMES = [
+    "ansi_strip",
+    "base64_truncate",
+    "html_strip",
+    "whitespace_collapse",
+    "dedup_lines",
+    "log_noise",
+    "url_shorten",
+    "json_truncate",
+    "table_compress",
+    "output_cap",
+]
+
+
+def _tokenjuice_default_config() -> dict:
+    """Return the default TokenJuice config (when no override is set)."""
+    return {
+        "plugin_loaded": True,
+        "enabled": True,
+        "max_output_chars": 8000,
+        "enabled_rules": list(_COMPRESSION_RULE_NAMES),
+        "all_rules": list(_COMPRESSION_RULE_NAMES),
+        "per_god_overrides": {},
+    }
+
+
+def _load_tokenjuice_config() -> dict:
+    """Read TokenJuice config from the plugin module, with safe fallbacks."""
+    cfg = _tokenjuice_default_config()
+    try:
+        import importlib.util as _ilu
+
+        spec = _ilu.spec_from_file_location(
+            "_tokenjuice_cfg",
+            os.path.join(_TOKENJUICE_PLUGIN_PATH, "compress.py"),
+        )
+        if spec and spec.loader:
+            mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            # Read its module-level constants for the live defaults
+            cfg["max_output_chars"] = getattr(mod, "DEFAULT_MAX_OUTPUT_CHARS", 8000)
+            # Discover which rules are actually registered
+            rules = getattr(mod, "_RULES", [])
+            enabled_names = [name for name, _ in rules]
+            cfg["all_rules"] = list(_COMPRESSION_RULE_NAMES)
+            cfg["enabled_rules"] = enabled_names or list(_COMPRESSION_RULE_NAMES)
+    except Exception as exc:
+        logger.debug("TokenJuice: live config load failed, using defaults: %s", exc)
+
+    # Per-god overrides
+    try:
+        from api.profiles import _resolve_profile_home_for_name, list_profiles_api
+
+        for profile in list_profiles_api():
+            god_name = profile.get("name")
+            if not god_name:
+                continue
+            try:
+                god_home = _resolve_profile_home_for_name(god_name)
+            except Exception:
+                continue
+            config_yaml = god_home / "config.yaml"
+            if not config_yaml.exists():
+                continue
+            import yaml as _yaml
+
+            try:
+                data = _yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            tj = (data.get("plugins") or {}).get("tokenjuice")
+            if isinstance(tj, dict):
+                override_enabled = tj.get("enabled")
+                if override_enabled is not None:
+                    cfg["per_god_overrides"][god_name] = {
+                        "enabled": bool(override_enabled),
+                    }
+    except Exception as exc:
+        logger.debug("TokenJuice: per-god override scan failed: %s", exc)
+
+    return cfg
+
+
+def _handle_tokenjuice_config(handler, parsed) -> bool:
+    """GET /api/tokenjuice/config — return plugin config + per-god overrides."""
+    return j(handler, _load_tokenjuice_config())
+
+
+def _handle_compression_stats(handler, parsed) -> bool:
+    """GET /api/compression/stats?days=7&god=foo — aggregated savings."""
+    query = parse_qs(parsed.query)
+    try:
+        days = int((query.get("days", ["7"])[0] or "7"))
+    except ValueError:
+        days = 7
+    days = max(1, min(days, 90))
+    god = (query.get("god", [""])[0] or "") or None
+    try:
+        import importlib.util as _ilu
+
+        spec = _ilu.spec_from_file_location(
+            "_tokenjuice_stats",
+            os.path.join(_TOKENJUICE_PLUGIN_PATH, "compress.py"),
+        )
+        if not spec or not spec.loader:
+            return j(handler, {"error": "TokenJuice not installed", "stats": _tokenjuice_default_config()})
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        read_stats = getattr(mod, "read_stats", None)
+        if not callable(read_stats):
+            return j(handler, {"error": "read_stats not available", "stats": None})
+        stats = read_stats(days=days, god=god)
+    except Exception as exc:
+        logger.debug("TokenJuice: stats read failed: %s", exc)
+        return j(handler, {"error": str(exc), "stats": None})
+    return j(handler, {"stats": stats, "days": days, "god": god})
+
+
+def _handle_god_compression_toggle(handler, parsed, body) -> bool:
+    """PATCH /api/gods/<name>/compression — toggle per-god compression on/off.
+
+    Body: { "enabled": true|false }
+    Persists to the god's config.yaml under plugins.tokenjuice.enabled.
+    """
+    from urllib.parse import unquote
+
+    parts = parsed.path.split("/")
+    # /api/gods/<name>/compression → 4 segments
+    if len(parts) != 5:
+        return bad(handler, "Invalid path (expected /api/gods/<name>/compression)", 400)
+    god_name = unquote(parts[3])
+    if not god_name:
+        return bad(handler, "God name required", 400)
+    if not isinstance(body, dict) or "enabled" not in body:
+        return bad(handler, "Missing 'enabled' in request body", 400)
+    enabled = bool(body.get("enabled"))
+
+    try:
+        from api.profiles import _resolve_profile_home_for_name
+        import yaml as _yaml
+
+        god_home = _resolve_profile_home_for_name(god_name)
+        god_home.mkdir(parents=True, exist_ok=True)
+        config_yaml = god_home / "config.yaml"
+        if config_yaml.exists():
+            data = _yaml.safe_load(config_yaml.read_text(encoding="utf-8")) or {}
+        else:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        plugins = data.setdefault("plugins", {})
+        if not isinstance(plugins, dict):
+            plugins = {}
+            data["plugins"] = plugins
+        tj = plugins.setdefault("tokenjuice", {})
+        if not isinstance(tj, dict):
+            tj = {}
+            plugins["tokenjuice"] = tj
+        tj["enabled"] = enabled
+        config_yaml.write_text(
+            _yaml.safe_dump(data, default_flow_style=False, sort_keys=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist per-god compression toggle for %s: %s", god_name, exc)
+        return bad(handler, f"Failed to persist: {exc}", 500)
+
+    return j(handler, {"god": god_name, "enabled": enabled, "saved": True})
+
+
 _SHELL_ERROR_HTML = """<!doctype html>
 <html lang=\"en\">
 <head>
@@ -3525,6 +3708,12 @@ a:hover{{text-decoration:underline}}
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
         return j(handler, get_provider_quota(provider_id))
+
+    # ── TokenJuice plugin config (L5 from OLYMPUS_UI_ROADMAP) ──────────────
+    if parsed.path == "/api/tokenjuice/config" and handler.command == "GET":
+        return _handle_tokenjuice_config(handler, parsed)
+    if parsed.path == "/api/compression/stats" and handler.command == "GET":
+        return _handle_compression_stats(handler, parsed)
 
     if parsed.path == "/api/settings":
         settings = load_settings()
@@ -7849,6 +8038,11 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+
+    # ── TokenJuice per-god compression toggle (L5 from OLYMPUS_UI_ROADMAP) ─
+    if parsed.path.startswith("/api/gods/") and parsed.path.endswith("/compression"):
+        return _handle_god_compression_toggle(handler, parsed, body)
+
     # ── Olympus routes — proxy to Olympus backend service (:8788) ──
     if parsed.path.startswith("/api/olympus/"):
         from urllib.request import Request as URLRequest, urlopen
