@@ -5,14 +5,15 @@ Adds USER_OBSERVATIONS extraction alongside the existing ICHOR_EVENTS block.
 Same LLM call, same context window, same response — just one more JSON block
 to parse and store in PostgreSQL.
 
-Imported by pantheon-ichor-nudge/__init__.py at plugin load time.
+Was previously at plugins/pantheon-ichor-nudge/user_observations_patch.py,
+consolidated into the pantheon plugin (2026-06-02).
 """
 import json
 import logging
 import sys
 from pathlib import Path
 
-logger = logging.getLogger("pantheon_ichor_nudge.user_observations")
+logger = logging.getLogger("pantheon.ichor_nudge.user_observations")
 
 # ---------------------------------------------------------------------------
 # Prompt addition (appended to AIAgent._MEMORY_REVIEW_PROMPT)

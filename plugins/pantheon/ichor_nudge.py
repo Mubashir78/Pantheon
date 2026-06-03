@@ -1,5 +1,6 @@
-"""Pantheon Ichor Nudge Plugin.
+"""Pantheon Ichor Nudge — consolidated into the pantheon plugin (2026-06-02).
 
+Was previously a standalone plugin at plugins/pantheon-ichor-nudge/.
 Hooks into the Hermes Agent memory nudge to extract structured Ichor events
 (decisions, commitments, insights, blockers, references, follow-ups, preferences)
 from the SAME LLM call that already runs for memory/skill review — zero extra LLM calls.
@@ -32,7 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("pantheon_ichor_nudge")
+logger = logging.getLogger("pantheon.ichor_nudge")
 
 # User observations extraction (same LLM call, extra output block)
 from .user_observations_patch import (
