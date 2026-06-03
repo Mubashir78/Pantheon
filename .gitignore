@@ -95,3 +95,4 @@ Thumbs.db
 
 # Personal user context — relationships, real names, private info
 user.md
+reports/*.json
