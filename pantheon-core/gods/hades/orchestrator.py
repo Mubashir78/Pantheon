@@ -94,7 +94,22 @@ def _run_phase_with_timeout(
                 before = embed_result.get("total_before", 0)
                 after = embed_result.get("total_after", 0)
                 rem = embed_result.get("remaining", 0)
-                logger.info("  → %d files embedded (total: %d → %d vectors, %d remaining)", newly, before, after, rem)
+                failed = embed_result.get("failed", 0)
+                logger.info("  → %d files embedded (total: %d → %d vectors, %d remaining, %d failed)",
+                            newly, before, after, rem, failed)
+                # Brittleness follow-up: per-file embed failures (Ollama
+                # timeouts, dim mismatches) are caught INSIDE _embed_file
+                # and surfaced as result["failed"], not as exceptions.
+                # Without this, the orchestrator's "clean run" check
+                # (which keys off report.errors) would clear the resumable
+                # state and the 9:15am notif would rubber-stamp success
+                # while 30 embeds silently failed. Promote to report.errors
+                # so the sentinel file + state-cleanup check both see it.
+                if failed > 0:
+                    report.errors.append(
+                        f"embed phase: {failed} files failed to embed "
+                        f"(see /home/konan/pantheon/logs/hades.log for per-file errors)"
+                    )
             _recheck_embedded_counts(report)
             logger.info("  → Report counts refreshed with accurate embed numbers")
         else:
