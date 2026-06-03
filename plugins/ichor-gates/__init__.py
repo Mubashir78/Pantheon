@@ -7,6 +7,8 @@ Pre-tool-call hooks:
   - State Gate: blocks write_file/patch on files not read first
   - Phase Detection: tracks RALPH phase transitions from user input
   - ReadCache: tracks read_file calls for State Gate awareness
+  - RTK command rewrite: passes terminal commands through `rtk rewrite`
+    before execution. Fails open — missing/unavailable rtk is a no-op.
 
 Post-tool-call hooks:
   - Logic Gate: syntax-validates write_file/patch output
@@ -33,6 +35,8 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -277,4 +281,76 @@ def register(ctx):
     # Register post-tool-call hook (observational)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
 
+    # Register RTK command rewriter (consolidated from rtk-rewrite plugin
+    # 2026-06-02). Fires AFTER the gates so a rewritten command still
+    # benefits from State Gate validation. Fails open — missing rtk
+    # binary is a no-op.
+    if _rtk_available():
+        ctx.register_hook("pre_tool_call", _rtk_pre_tool_call)
+        logger.info("Ichor Gates: RTK rewrite pass active (rtk binary found)")
+    else:
+        logger.info("Ichor Gates: RTK rewrite pass inactive (rtk binary not in PATH)")
+
     logger.info("Ichor Gates plugin registered: pre_tool_call + post_tool_call hooks active")
+
+
+# ---------------------------------------------------------------------------
+# RTK command rewriter (consolidated from plugins/rtk-rewrite/ on 2026-06-02)
+# ---------------------------------------------------------------------------
+# All rewrite logic lives in RTK's Rust `rtk rewrite` command; this module
+# only bridges Hermes pre_tool_call payloads to that command and fails open.
+# ---------------------------------------------------------------------------
+
+ACCEPTED_REWRITE_RETURN_CODES = {0, 3}
+EXPECTED_PASSTHROUGH_RETURN_CODES = {1, 2}
+_rtk_missing_warned = False
+
+
+def _rtk_available() -> bool:
+    """Return whether the rtk binary is in PATH, warning once when missing."""
+    global _rtk_missing_warned
+    found = shutil.which("rtk") is not None
+    if not found and not _rtk_missing_warned:
+        print("ichor-gates: rtk binary not found in PATH; rewrite pass disabled",
+              file=sys.stderr)
+        _rtk_missing_warned = True
+    return found
+
+
+def _rtk_pre_tool_call(tool_name=None, args=None, **_kwargs):
+    """Rewrite mutable Hermes terminal command args when RTK provides a change."""
+    try:
+        if tool_name != "terminal" or not isinstance(args, dict):
+            return
+
+        command = args.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return
+
+        try:
+            result = subprocess.run(
+                ["rtk", "rewrite", command],
+                shell=False,
+                timeout=2,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            print("ichor-gates: rtk rewrite timed out", file=sys.stderr)
+            return
+
+        if result.returncode not in ACCEPTED_REWRITE_RETURN_CODES:
+            if result.returncode not in EXPECTED_PASSTHROUGH_RETURN_CODES:
+                details = f"rtk rewrite failed with exit {result.returncode}"
+                stderr = result.stderr.strip()
+                if stderr:
+                    details = f"{details}: {stderr}"
+                print(f"ichor-gates: {details}", file=sys.stderr)
+            return
+
+        rewritten = result.stdout.strip()
+        if rewritten and rewritten != command:
+            args["command"] = rewritten
+    except Exception as e:
+        print(f"ichor-gates: rtk rewrite error: {e}", file=sys.stderr)
+        return
