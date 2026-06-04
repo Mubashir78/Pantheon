@@ -96,3 +96,6 @@ Thumbs.db
 # Personal user context — relationships, real names, private info
 user.md
 reports/*.json
+
+# Beelink provisioning secrets (the .example is committed, the .env is not)
+scripts/beelink-web.env
