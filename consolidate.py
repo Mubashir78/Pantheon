@@ -93,14 +93,30 @@ def main() -> int:
     # Pass through any flags the caller provided
     cmd.extend(sys.argv[1:])
 
-    # Default a 25-minute hard timeout. Cron jobs shouldn't take
-    # longer than that; if they do, we want to know.
+    # Default a 60-minute hard timeout (was 25 min). The previous
+    # 1500s total → 500s/phase was too tight once the embed phase
+    # started actually doing work (~23s/file on local ollama means
+    # 30 files takes ~12 min, leaving 38 min unused in the 25-min
+    # budget that triggered the per-phase alarm). The new 3600s
+    # → 1200s/phase is sized for HADES_EMBED_MAX_FILES=150
+    # (≈58 min worst case) with headroom for slow files.
     env = os.environ.copy()
     if "--timeout" not in sys.argv:
-        cmd.extend(["--timeout", "1500"])
+        cmd.extend(["--timeout", "3600"])
+
+    # Raise the per-phase file cap from 30 → 150 to drain the
+    # ~185-file backlog in ~2 nightly runs. Read by
+    # ``hades.embed.embed_missing_files()`` (default 30 if unset).
+    # Manual callers can override via env var or by passing the
+    # ``max_files`` arg to ``embed_missing_files()`` directly.
+    env.setdefault("HADES_EMBED_MAX_FILES", "150")
 
     # Delegation log goes to stderr so --json consumers can pipe stdout
     print(f"[consolidate.py] Delegating to: {' '.join(cmd)}", file=sys.stderr)
+    print(
+        f"[consolidate.py] HADES_EMBED_MAX_FILES={env['HADES_EMBED_MAX_FILES']}",
+        file=sys.stderr,
+    )
     result = subprocess.run(cmd, env=env)
     return result.returncode
 

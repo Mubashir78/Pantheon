@@ -182,24 +182,44 @@ def _embed_file(file_path: str, content: str, codex_hint: str = "") -> bool:
         return False
 
 
-def embed_missing_files(max_files: int = 30) -> Dict[str, Any]:
-    """Backfill filesystem files not yet in ChromaDB, up to max_files per run.
+def embed_missing_files(max_files: int | None = None) -> Dict[str, Any]:
+    """Backfill filesystem files not yet in ChromaDB, up to ``max_files`` per run.
 
     Walks each Codex, checks ChromaDB via per-collection query (not full dump),
-    and embeds any missing files. Capped at max_files to avoid runaway runtime.
+    and embeds any missing files. Capped at ``max_files`` to avoid runaway runtime.
 
     Args:
-        max_files: Max files to embed per run (default 200).
+        max_files: Max files to embed per run. If ``None`` (default), reads
+            the ``HADES_EMBED_MAX_FILES`` env var; falls back to ``30`` if
+            unset. ``consolidate.py`` sets this to ``150`` to drain the
+            ~185-file backlog in ~2 nightly runs; manual callers can
+            override per-run via the env var or by passing the arg.
 
-    Returns: {
-        "embedded": int,      # files newly embedded
-        "skipped": int,       # files skipped (unavailable embedder)
-        "failed": int,        # files that errored
-        "remaining": int,     # files still unembedded (estimate)
-        "total_before": int,  # vectors in ChromaDB before backfill
-        "total_after": int,   # vectors in ChromaDB after backfill
-    }
+    Returns:
+        Dict with ``embedded``, ``skipped``, ``failed``, ``remaining``,
+        ``total_before``, ``total_after`` keys.
     """
+    if max_files is None:
+        # Read from env so consolidate.py (and other cron wrappers) can
+        # raise the per-run cap without changing the function signature.
+        # Brittleness fix (2026-06-04): prior hard-coded 30-file cap
+        # was throttling nightly drain rate to 30/night. With ~23s/file
+        # on local ollama, 150 fits in the 1200s per-phase budget
+        # (3600s --timeout // 3) with room to spare.
+        try:
+            max_files = int(os.environ.get("HADES_EMBED_MAX_FILES", "30"))
+        except (TypeError, ValueError):
+            max_files = 30
+    if max_files < 1:
+        # Defensive: env-var typo or empty string would yield 0, which
+        # would silently no-op the embed phase. Floor at the legacy
+        # default so a misconfiguration can't hide a real failure.
+        logger.warning(
+            "  → HADES_EMBED_MAX_FILES resolved to %s, falling back to 30",
+            max_files,
+        )
+        max_files = 30
+    logger.info("  → max_files cap for this run: %d", max_files)
     result: Dict[str, Any] = {
         "embedded": 0,
         "skipped": 0,
