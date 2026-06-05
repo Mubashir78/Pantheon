@@ -146,7 +146,26 @@ phase_2_clone() {
         log "  $PANTHEON_HOME already exists; pulling"
         (cd "$PANTHEON_HOME" && git fetch origin && git reset --hard "origin/$PANTHEON_REPO_BRANCH")
     else
-        git clone --recurse-submodules --branch "$PANTHEON_REPO_BRANCH" "$PANTHEON_REPO" "$PANTHEON_HOME"
+        # Clone with submodule recurse. If the pinned submodule SHA is dead
+        # (upstream force-push / ref rewrite / tag deleted), `--recurse-submodules`
+        # dies with `upload-pack: not our ref <sha>`. We retry by populating
+        # the submodule from the default branch of hermes-agent instead.
+        if ! git clone --recurse-submodules --branch "$PANTHEON_REPO_BRANCH" "$PANTHEON_REPO" "$PANTHEON_HOME"; then
+            warn "submodule clone failed (likely pinned SHA is gone from upstream)"
+            log "  re-cloning with placeholder URL, then we will fix the submodule"
+            rm -rf "$PANTHEON_HOME"
+            git clone --branch "$PANTHEON_REPO_BRANCH" "$PANTHEON_REPO" "$PANTHEON_HOME"
+            (
+                cd "$PANTHEON_HOME"
+                # Drop the dead pin and re-init submodule against default branch
+                git submodule deinit -f hermes-agent 2>/dev/null || true
+                git rm -f hermes-agent 2>/dev/null || true
+                rm -rf .git/modules/hermes-agent
+                git submodule add --force "https://github.com/NousResearch/hermes-agent.git" hermes-agent
+                git -c user.name="pantheon-quickstart" -c user.email="quickstart@pantheon.local" \
+                    commit -m "fix: re-pin hermes-agent submodule to live default branch" || true
+            )
+        fi
     fi
     ok "Pantheon cloned at $PANTHEON_HOME"
     phase_done 2
