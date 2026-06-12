@@ -4,11 +4,15 @@
 enterprise side). Run these steps from a fresh shell on his Pantheon host.
 **Time estimate:** 30-45 minutes total. Most of it is the `git pull` and
 the Ichor migration.
-**Last updated:** 2026-06-12 (post-GitHub push `ff4807e`).
+**Last updated:** 2026-06-12 (post-GitHub push `ff4807e`, plus a
+revision clarifying Tailscale-only NATS access).
 
 ## TL;DR
 
 ```bash
+# 0. Before you start: get the relay-7 Tailscale IP from Konan
+#    (e.g. 100.100.46.52). You'll need it for Part 3.
+
 # 1. Update Pantheon to the post-push HEAD
 cd ~/pantheon && git pull
 
@@ -19,7 +23,7 @@ pip install -e ~/pantheon/hermes-agent
 # 3. Re-run the install script (idempotent — picks up new files)
 bash ~/pantheon/scripts/install-pantheon.sh
 
-# 4. Activate memory (3 layers, in order)
+# 4. Activate memory (4 layers + the new cadence/nudge/flush)
 hermes config set memory.ichor.cadence.full_recall 3
 hermes config set memory.ichor.cadence.fast_recall 1
 hermes config set memory.ichor.cadence.extract_every 1
@@ -27,8 +31,8 @@ hermes config set memory.ichor.cadence.synthesis 10
 hermes config set memory.ichor.nudge_interval 5
 hermes config set memory.ichor.flush_min_turns 6
 
-# 5. Connect to Clawforge (one-time provisioning + verify)
-# ... see "Clawforge Connect" below
+# 5. Connect to Clawforge (install Tailscale, get a token, start the proxy)
+#    See "Clawforge Connect" below. Requires the relay-7 Tailscale IP from step 0.
 ```
 
 If any step fails, see the per-section "If something goes wrong" notes at
@@ -246,10 +250,22 @@ pip install -e ~/pantheon
 ## Part 3: Connect to Clawforge
 
 Clawforge is the cross-instance learning system. You connect by:
-1. Running the `clawforge-proxy` daemon (the SkillClaw-equivalent)
-2. Provisioning a per-instance client token
-3. Verifying the registry sees you
-4. Opting in to the public federation dashboard
+1. Installing/confirming Tailscale (NATS is reached over the tailnet,
+   not the public internet — see the "Why Tailscale" note below)
+2. Running the `clawforge-proxy` daemon (the SkillClaw-equivalent)
+3. Provisioning a per-instance client token
+4. Verifying the registry sees you
+5. Opting in to the public federation dashboard
+
+**Why Tailscale (not the public internet):** Clawforge's NATS bus
+normally runs over the Tailscale tailnet shared between Pantheon
+instances. Exposing NATS to the public internet via a Cloudflare
+TCP tunnel is possible but requires (a) WARP routing enabled on
+the tunnel, (b) a Zero Trust TCP app for the NATS hostname, and
+(c) a WARP client on every connecting instance. That's a
+half-day of dashboard-level setup not covered here. For Tallon's
+install, Tailscale over the existing tailnet is the canonical
+path.
 
 ### 3.1. Install the proxy + god tools
 
@@ -269,30 +285,55 @@ for s in ~/pantheon/scripts/clawforge-*.py; do
   ln -sf "$s" ~/.local/bin/"$(basename "$s")"
 done
 
-# 3.1.2. Create the proxy config
+# 3.1.2. Install Tailscale (required — Clawforge uses NATS over the
+# tailnet, NOT over the public internet). Skip if you already have it.
+# (Most enterprise Pantheon installs have Tailscale pre-installed.)
+if ! command -v tailscale >/dev/null 2>&1; then
+  curl -fsSL https://tailscale.com/install.sh | sh
+  sudo tailscale up
+  # After this, you have a 100.x.y.z Tailscale IP. You'll use it below.
+fi
+Tailscale_IP=$(tailscale ip -4 2>/dev/null | head -1)
+echo "Your Tailscale IP: $Tailscale_IP"
+# Get the Tailscale IP for relay-7 from Konan.
+# (Konan's Tailscale IP for relay-7 is 100.100.46.52 — but only works
+#  if Tallon is on the same tailnet. If on a different tailnet, Konan
+#  will share relay-7's Tailscale node key so the machines can connect
+#  across tailnets, OR you can join Konan's tailnet via invite link.)
+# Save the value Konan gives you in an env var for the next step:
+RELAY_7_TS="<relay-7-tailnet-ip>"   # ← REPLACE with the IP Konan gives you
+echo "Relay-7 Tailscale IP: $RELAY_7_TS"
+# Verify you can reach relay-7 over the tailnet:
+tailscale ping -c 1 "$RELAY_7_TS"  # should get a reply
+
+# 3.1.3. Create the proxy config
 mkdir -p ~/.hermes/clawforge
 
-cat > ~/.hermes/clawforge.yaml << 'YAML'
+cat > ~/.hermes/clawforge.yaml << YAML
 # Clawforge Proxy v0.1.0 — Tallon instance config
 # Read by clawforge-proxy daemon AND the clawforge CLI.
 
 relay:
-  host: "100.100.46.52"   # Tailscale IP for relay-7 (replace if your tailnet differs)
+  # Tailscale IP for relay-7 (NOT the public theoforgesolutions.com host —
+  # NATS is reached over the tailnet, not the public Cloudflare TCP tunnel,
+  # because the TCP tunnel requires WARP routing + a Zero Trust TCP app,
+  # which is a separate setup not covered here). Konan will provide this IP.
+  host: "$RELAY_7_TS"
   port: 4222
   # Token loaded from ~/.hermes/clawforge-tokens.env (CLAWFORGE_CLIENT_TOKEN)
 
 instance:
   id: "tallon"  # ← CHANGE THIS to a unique instance ID
   display_name: "Tallon's Pantheon"
-  god_registry: "/home/<you>/pantheon/gods/gods.yaml"  # ← CHANGE <you>
+  god_registry: "/home/\$(whoami)/pantheon/gods/gods.yaml"
 
 heartbeat_interval_seconds: 300
-peers_cache: "/home/<you>/.hermes/clawforge/known-instances.json"
-log_file: "/home/<you>/.hermes/clawforge/proxy.log"
+peers_cache: "/home/\$(whoami)/.hermes/clawforge/known-instances.json"
+log_file: "/home/\$(whoami)/.hermes/clawforge/proxy.log"
 YAML
 
-# 3.1.3. Replace <you> with your actual username
-sed -i "s|<you>|$(whoami)|g" ~/.hermes/clawforge.yaml
+# 3.1.4. Replace <you> with your actual username
+sed -i "s|<you>|\$(whoami)|g" ~/.hermes/clawforge.yaml
 ```
 
 ### 3.2. Get a Clawforge client token
@@ -414,10 +455,27 @@ clawforge-god-publisher.py ~/.hermes/profiles/data/ --instance tallon
 ```
 
 **`curl https://federation.theoforgesolutions.com/INDEX.json` times out:**
-You're not on the Tailscale tailnet. Options:
-- Join the konan tailnet (ask Konan for an invite link)
-- Use a NATS-over-public-TCP route (Konan would need to add the
-  cloudflared TCP tunnel for the federation subdomain; not done yet)
+The federation dashboard is publicly reachable over HTTP, so this
+should work from any network. If it doesn't, check your internet
+connection + DNS. The dashboard is at
+`https://federation.theoforgesolutions.com/INDEX.json` and updates
+every 5 min via the cron on relay-7.
+
+**`tailscale ping -c 1 "$RELAY_7_TS"` fails:**
+You can't reach relay-7 over the tailnet. Common causes:
+- Relay-7 isn't on your tailnet (your tailnet admin needs to add it,
+  or invite relay-7's Tailscale account)
+- You and relay-7 are on different tailnets. If Konan and Tallon
+  run separate tailnets, the simplest path is to share Tailscale
+  via a single account or use `--accept-routes` + ACL on the konan
+  side
+- Firewall blocking UDP port 41641 (Tailscale's wireguard port).
+  Open it on the relay-7 network ACL.
+
+A future setup (out of scope here) could enable a public NATS route
+via Cloudflare TCP tunnel + WARP routing + a Zero Trust TCP app, but
+that requires dashboard-level Cloudflare access. For now, Tailscale
+is the canonical path.
 
 **Proxy keeps restarting in a loop:**
 Check the log: `tail -50 ~/.hermes/clawforge/proxy.log`. Common causes:
