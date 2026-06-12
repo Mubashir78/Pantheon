@@ -99,3 +99,20 @@ reports/*.json
 
 # Beelink provisioning secrets (the .example is committed, the .env is not)
 scripts/beelink-web.env
+
+# =============================================================================
+# Added 2026-06-12 — bulk-push cleanup before GitHub upload
+# =============================================================================
+
+# n8n runtime: cache dir (rendered JS/CSS assets, ~300MB) and .n8n state
+n8n-data/.cache/
+n8n-data/.8n/
+n8n-data/database.sqlite
+n8n-data/n8nEventLog*.log
+
+# WebUI build outputs (Vite emits content-hashed JS/CSS, not source)
+webui/static/assets/
+
+# Local backup files (e.g. `something.py.bak.pre-xxx-20260608-173641`)
+# These are local-only safety nets; never push.
+*.bak
