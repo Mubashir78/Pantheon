@@ -298,7 +298,7 @@ header "Cron Jobs"
 
 # Symlink critical cron scripts from repo to ~/.hermes/scripts/ so Hermes can find them
 mkdir -p "${HERMES_DIR}/scripts"
-CRON_SCRIPTS=("shared-context-digest.py" "ichor_subconscious.py" "morning-briefing.py" "inject-shared-context.py")
+CRON_SCRIPTS=("shared-context-digest.py" "ichor_subconscious.py" "morning-briefing.py")
 for script in "${CRON_SCRIPTS[@]}"; do
   repo_script="$PANTHEON_DIR/scripts/$script"
   target_link="${HERMES_DIR}/scripts/$script"

@@ -185,27 +185,9 @@ def run_health_checks() -> Dict[str, Any]:
         "chroma_count": None,
     }
 
-    # Try to read ChromaDB for comparison
+    # ChromaDB removed in P4a — chroma counts no longer tracked
     chroma_counts: Dict[str, int] = {}
-    try:
-        import chromadb
-        if CHROMA_DIR.is_dir():
-            client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-            for col in client.list_collections():
-                try:
-                    name = col.name  # e.g. "pantheon_codex_forge"
-                    # Parse the codex name back
-                    parts = name.split("_", 2)
-                    if len(parts) >= 3:
-                        raw = parts[2]
-                        words = raw.split("_")
-                        codex_name = "Codex-" + "-".join(w.capitalize() for w in words) if words else "Codex-General"
-                        chroma_counts[codex_name] = col.count()
-                except Exception:
-                    pass
-        health["chroma_count"] = sum(chroma_counts.values()) if chroma_counts else None
-    except ImportError:
-        pass  # chromadb not available
+    health["chroma_count"] = None
 
     for codex_name in KNOWN_CODEXES:
         codex_dir = ATHENAEUM_ROOT / codex_name
@@ -235,23 +217,14 @@ def run_health_checks() -> Dict[str, Any]:
         if still_missing:
             health["missing_indexes"].extend(still_missing)
 
-        # Chroma vs FS comparison
-        embeddable_count = len(info["embeddable"])
-        chroma_count = chroma_counts.get(codex_name, 0)
+        # Chroma-vs-FS comparison removed in P4a (no vector DB to compare against).
+        # Orphan detection is now file-system-only.
         health["chroma_vs_fs"][codex_name] = {
-            "chroma": chroma_count,
-            "fs_embeddable": embeddable_count,
-            "delta": chroma_count - embeddable_count,
+            "chroma": 0,
+            "fs_embeddable": 0,
+            "delta": 0,
+            "note": "ChromaDB removed in P4a; comparison no longer meaningful",
         }
-
-        if chroma_count > embeddable_count:
-            # Chroma has more than filesystem — some are orphaned
-            pass  # Detailed orphan detection requires iterating IDs
-        elif embeddable_count > chroma_count:
-            for f in info["embeddable"]:
-                health["orphans"]["fs_unembedded"].append(str(f.relative_to(ATHENAEUM_ROOT)))
-                if len(health["orphans"]["fs_unembedded"]) > 50:
-                    break
 
         # Find stale files
         stale = find_stale_files(codex_dir)

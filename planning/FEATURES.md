@@ -144,7 +144,7 @@ A comprehensive collection of CLI scripts for system management:
 - `hades` — nightly consolidation runner
 - `demeter-watch.py` — file watcher launcher
 - `check_heartbeat.py` — health check runner
-- `inject-shared-context.py` — cross-god context injection
+- `shared-context-watcher.py` — inotify shared-context → ichor_events injection
 - `the-fates.py` — system orchestration
 - `setup-server.py` — server provisioning
 - `migrate-*` scripts — data migration tools

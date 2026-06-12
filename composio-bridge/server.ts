@@ -176,20 +176,31 @@ app.delete("/connections/:id", async (req: Request, res: Response) => {
 });
 
 // ─── Execute a Composio tool ──────────────────────────────────
-
+// v3 raw API call shape: client.tools.execute(slug, params) where params use
+// snake_case keys: connected_account_id, user_id, arguments, version, etc.
+// We accept camelCase from the HTTP caller and convert to the raw API shape.
 app.post("/execute", async (req: Request, res: Response) => {
   try {
-    const { tool, params, connectedAccountId } = req.body;
+    const {
+      tool,
+      params,
+      arguments: args,
+      connectedAccountId,
+      userId,
+      version,
+      dangerouslySkipVersionCheck,
+    } = req.body;
     if (!tool) {
       return res.status(400).json({ error: "tool is required" });
     }
-
-    const result = await client.tools.execute({
-      tool,
-      params: params || {},
-      connectedAccountId,
-    });
-
+    const apiParams: any = {
+      arguments: args || params || {},
+    };
+    if (connectedAccountId) apiParams.connected_account_id = connectedAccountId;
+    if (userId) apiParams.user_id = userId;
+    if (version) apiParams.version = version;
+    if (dangerouslySkipVersionCheck) apiParams.version = "00000000_00";  // arbitrary valid version
+    const result = await client.tools.execute(tool, apiParams);
     res.json({ data: result });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";

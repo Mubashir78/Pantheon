@@ -1,149 +1,192 @@
 #!/usr/bin/env python3
-"""Shared context injection — regenerates CONTEXT_{user_id}.md per user.
+"""
+inject-shared-context.py — Shared Context → Ichor Injection Script (v2)
 
-Runs every 15 minutes via cron. For each user who has a decisions/
-subdirectory under ~/pantheon/shared/decisions/{user_id}/, picks recent
-high-priority decisions and generates a budget-aware summary for
-injection into that user's agent system prompts.
+Injects shared context files into Ichor's ichor_events table as digest_entry
+events, making them queryable via ichor_retrieve by all Pantheon gods.
 
-Multi-user ready: iterates all user subdirs in decisions/.
-Single-user today (user=konan) — just works.
+Companion to the agent-driven shared-context-injection cron job (f6ec8a7b7ca4).
+Runs as a script fallback when the agent-driven job is unavailable.
+
+Sources: DIGEST.md, CONTEXT_*.md, athenaeum-writes.md, decisions/, active/
+Destination: ichor_events table with event_type='digest_entry'
+
+Schema:
+  event_type='digest_entry'
+  subject='shared:{category}:{content_hash}'
+  raw_text=file_content (truncated to 10K for large files)
+  source='inject-shared-context.py'
+  importance=50.0, trust=50.0, maturity='validated'
+  god_name='thoth'
+
+Cron schedule: every 15 minutes
+Dedup: by subject key (SHA-256 content hash first 16 chars)
 """
 
-import os
-import sys
+import os, sqlite3, hashlib
 from pathlib import Path
+from datetime import datetime, timezone
 
-SHARED_DIR = Path.home() / "pantheon" / "shared"
-DECISIONS_ROOT = SHARED_DIR / "decisions"
-
-MODEL_WINDOWS = {
-    "deepseek": 1_000_000, "gemini": 2_000_000,
-    "claude": 200_000, "llama": 128_000, "qwen": 128_000,
-    "mistral": 128_000, "phi": 16_000, "tinyllama": 16_000,
-}
-
-DEFAULT_WINDOW = 128_000
-BUDGET_FRACTION = 0.03
-SMALL_BUDGET_FRACTION = 0.01
+SHARED_DIR = Path("/home/konan/pantheon/shared")
+ICHOR_DB = Path("/home/konan/.hermes/ichor.db")
+LOG_FILE = Path("/home/konan/pantheon/logs/inject-shared-context.log")
 
 
-def load_decisions(decisions_dir: Path):
-    decisions = []
-    for fpath in sorted(decisions_dir.glob("*.md"), reverse=True)[:100]:
-        try:
-            text = fpath.read_text()
-            parts = text.split("---", 2)
-            if len(parts) < 3:
-                continue
-            fm = {}
-            for line in parts[1].strip().split("\n"):
-                if ":" not in line:
-                    continue
-                k, _, v = line.partition(":")
-                k, v = k.strip(), v.strip().strip('"')
-                if k == "priority":
-                    try:
-                        fm["priority"] = int(v)
-                    except ValueError:
-                        fm["priority"] = 3
-                elif k in ("domain", "summary", "date", "user_id"):
-                    fm[k] = v
-            fm.setdefault("priority", 3)
-            fm.setdefault("domain", "general")
-            fm.setdefault("summary", "")
-            fm.setdefault("date", "")
-            decisions.append(fm)
-        except OSError:
-            continue
-    return decisions
+def log(msg):
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except OSError:
+        pass
 
 
-def estimate_window(model=""):
-    ml = model.lower()
-    for key in sorted(MODEL_WINDOWS, key=len, reverse=True):
-        if key in ml:
-            return MODEL_WINDOWS[key]
-    return DEFAULT_WINDOW
+def content_hash(content):
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
-def generate_for_user(user_id: str) -> int:
-    """Generate CONTEXT_{user_id}.md for a single user. Returns number of decisions injected."""
-    decisions_dir = DECISIONS_ROOT / user_id
-    output_path = SHARED_DIR / f"CONTEXT_{user_id}.md"
+def get_dedup_subjects(cursor):
+    try:
+        cursor.execute(
+            "SELECT subject FROM ichor_events WHERE event_type = 'digest_entry'"
+        )
+        return {row[0] for row in cursor.fetchall()}
+    except sqlite3.OperationalError:
+        return set()
 
-    if not decisions_dir.exists():
-        print(f"  [skip] No decisions dir for user '{user_id}': {decisions_dir}")
-        return 0
 
-    decisions = load_decisions(decisions_dir)
-    if not decisions:
-        print(f"  [skip] No decisions for user '{user_id}'")
-        return 0
+def inject_file_content(cursor, category, content, existing_subjects,
+                        god_name="thoth", session_id="cron-inject"):
+    ch = content_hash(content)
+    subject = f"shared:{category}:{ch}"
+    if subject in existing_subjects:
+        return False
+    try:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute(
+            """INSERT INTO ichor_events 
+               (session_id, event_type, subject, predicate, object,
+                raw_text, created_at, god_name,
+                importance, trust, maturity, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, "digest_entry", subject, category,
+             f"Shared context {category}", content[:10000],
+             now, god_name, 50.0, 50.0, "validated",
+             "inject-shared-context.py"),
+        )
+        return True
+    except sqlite3.OperationalError as e:
+        log(f"  ERROR: {e}")
+        return False
 
-    ctx = estimate_window(os.environ.get("HERMES_MODEL", ""))
-    budget = int(ctx * BUDGET_FRACTION)
 
-    # Sort by priority desc, then date desc
-    decisions.sort(key=lambda d: (-d.get("priority", 0), d.get("date", "")))
+def main():
+    log("=" * 60)
+    log("Injecting shared context...")
+    log(f"  SHARED: {SHARED_DIR}")
+    log(f"  DB:     {ICHOR_DB}")
 
-    lines = []
-    used = 80  # header overhead
-    if budget < 200:
-        # Compressed summary for tiny-budget models
-        top = [d.get("summary", "") for d in decisions[:3] if d.get("summary")]
-        combined = " | ".join(top)
-        max_chars = max(budget * 4 - 20, 20)
-        if len(combined) > max_chars:
-            combined = combined[:max_chars] + "..."
-        lines = [
-            "## Recent Decisions\n",
-            f"_Budget summary (ctx: {ctx:,}t)_\n",
-            combined + "\n",
-        ]
+    if not ICHOR_DB.exists():
+        log(f"  ERROR: Ichor DB not found at {ICHOR_DB}")
+        return
+
+    conn = sqlite3.connect(str(ICHOR_DB))
+    cursor = conn.cursor()
+    existing = get_dedup_subjects(cursor)
+    injected = 0
+    skipped = 0
+
+    # 1. DIGEST.md
+    f = SHARED_DIR / "DIGEST.md"
+    if f.is_file():
+        sz = f.stat().st_size
+        log(f"  -> digest: DIGEST.md ({sz}b)")
+        if inject_file_content(cursor, "digest", f.read_text(encoding="utf-8", errors="replace"), existing):
+            log("  + shared:digest")
+            injected += 1
+        else:
+            skipped += 1
     else:
-        lines.append("## Recent Decisions\n")
-        for d in decisions:
-            s = d.get("summary", "")
-            if not s:
-                continue
-            est = len(s) // 4 + 30
-            if used + est > budget:
-                break
-            icon = {9: "🔴", 7: "🟠", 5: "🟡"}.get(d.get("priority", 0), "⚪")
-            dt = d.get("date", "")[:10]
-            lines.append(f"- {icon} **{s}**" + (f" — _{dt}_" if dt else "") + "\n")
-            used += est
+        log("  -> digest: NOT FOUND")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("".join(lines))
-    count = sum(1 for l in lines if l.startswith("- "))
-    print(f"  ✓ Wrote {count} decisions → {output_path.name} ({ctx:,} ctx, {budget:,}t budget)")
-    return count
+    # 2. CONTEXT_*.md
+    for ctx_file in sorted(SHARED_DIR.glob("CONTEXT_*.md")):
+        sz = ctx_file.stat().st_size
+        uid = ctx_file.stem.replace("CONTEXT_", "")
+        log(f"  -> context: {ctx_file.name} ({sz}b)")
+        if inject_file_content(cursor, f"context:{uid}", ctx_file.read_text(encoding="utf-8", errors="replace"), existing):
+            log(f"  + shared:context:{uid}")
+            injected += 1
+        else:
+            skipped += 1
 
+    # 3. athenaeum-writes.md
+    f = SHARED_DIR / "athenaeum-writes.md"
+    if f.is_file():
+        sz = f.stat().st_size
+        log(f"  -> athenaeum: {f.name} ({sz}b)")
+        if inject_file_content(cursor, "athenaeum", f.read_text(encoding="utf-8", errors="replace"), existing):
+            log("  + shared:athenaeum")
+            injected += 1
+        else:
+            skipped += 1
+    else:
+        log("  -> athenaeum-writes: NOT FOUND")
 
-def generate() -> int:
-    if not DECISIONS_ROOT.exists():
-        print(f"No decisions root: {DECISIONS_ROOT}")
-        return 0
+    # 4. decisions/
+    dec_dir = SHARED_DIR / "decisions"
+    total_dec = 0
+    if dec_dir.is_dir():
+        for entry in sorted(dec_dir.iterdir()):
+            if entry.is_dir() and not entry.name.startswith("."):
+                for md in sorted(entry.iterdir()):
+                    if md.suffix == ".md" and md.name != "INDEX.md":
+                        total_dec += 1
+                        cat = f"decisions:{entry.name}:{md.stem}"
+                        c = md.read_text(encoding="utf-8", errors="replace")
+                        if inject_file_content(cursor, cat, c[:2000], existing):
+                            log(f"  + shared:{cat}")
+                            injected += 1
+                        else:
+                            skipped += 1
+            elif entry.suffix == ".md" and entry.name != "INDEX.md":
+                total_dec += 1
+                cat = f"decisions:{entry.stem}"
+                c = entry.read_text(encoding="utf-8", errors="replace")
+                if inject_file_content(cursor, cat, c[:2000], existing):
+                    log(f"  + shared:{cat}")
+                    injected += 1
+                else:
+                    skipped += 1
+        log(f"  -> decisions: {total_dec} file(s)")
+    else:
+        log("  -> decisions: NOT FOUND")
 
-    # Discover all user subdirectories
-    user_dirs = sorted(
-        d.name for d in DECISIONS_ROOT.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
-    )
+    # 5. active/
+    act_dir = SHARED_DIR / "active"
+    total_act = 0
+    if act_dir.is_dir():
+        for md in sorted(act_dir.iterdir()):
+            if md.suffix == ".md":
+                total_act += 1
+                cat = f"active:{md.stem}"
+                c = md.read_text(encoding="utf-8", errors="replace")
+                if inject_file_content(cursor, cat, c[:2000], existing):
+                    log(f"  + shared:{cat}")
+                    injected += 1
+                else:
+                    skipped += 1
+        log(f"  -> active: {total_act} file(s)")
+    else:
+        log("  -> active: NOT FOUND")
 
-    if not user_dirs:
-        print(f"No user directories found under {DECISIONS_ROOT}")
-        return 0
-
-    print(f"Generating per-user CONTEXT for: {', '.join(user_dirs)}")
-    total = 0
-    for uid in user_dirs:
-        total += generate_for_user(uid)
-
-    return total
+    conn.commit()
+    conn.close()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    log(f"\nDone. {injected} injected, {skipped} skipped (already current). ({ts})")
+    log("")
 
 
 if __name__ == "__main__":
-    sys.exit(0 if generate() else 1)
+    main()

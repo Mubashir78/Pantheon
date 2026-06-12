@@ -41,13 +41,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.memory_provider import MemoryProvider
 
-# GraphClient for entity-relationship tracking.
-# Now lives as a sibling module of this __init__.py at
-# plugins/pantheon/graph_client.py (consolidated from the deleted
-# pantheon-core/gods/graph_client.py on 2026-06-02). Re-exported so
-# existing consumers using `from plugins.pantheon import GraphClient`
-# keep working.
-from .graph_client import GraphClient as _GraphClient
+# GraphClient removed in P4b — graph.db deleted, WARM entities replace it.
+# See lib/ichor_tier_a._upsert_to_warm for the new write path.
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +354,7 @@ class PantheonMemoryProvider(MemoryProvider):
         self._prefetch_thread: Optional[threading.Thread] = None
         self._initialized = False
         self._chroma_available = False
-        self._graph: Optional[_GraphClient] = None
+        self._graph: Any = None  # P4b: GraphClient removed; was entity-relationship tracking
 
     # -- Provider identity ------------------------------------------------
 
@@ -473,34 +468,17 @@ class PantheonMemoryProvider(MemoryProvider):
         if self._chroma_available:
             self._ensure_codex_collections()
 
-        # Initialize graph database for entity-relationship tracking
-        try:
-            self._graph = _GraphClient()
-            self._graph.connect()
-            # Register the current session in the graph
-            if session_id:
-                self._graph.register_session(
-                    session_id,
-                    metadata={"hermes_home": self._hermes_home},
-                )
-            # Ensure Codex nodes exist
-            for codex_name in _list_codexes(self._athenaeum_root):
-                cid = f"codex:{codex_name}"
-                self._graph.upsert_node(
-                    cid, "codex", codex_name,
-                )
-        except Exception as exc:
-            logger.warning("GraphClient initialization failed: %s", exc)
-            self._graph = None
+        # Graph database removed in P4b — was writing session nodes, codex
+        # nodes, and entity edges to ~/.hermes/pantheon/graph.db. Now handled
+        # via WARM entities (lib/ichor_tier_a._upsert_to_warm).
+        self._graph = None
 
         self._initialized = True
 
     def shutdown(self) -> None:
-        """Clean shutdown — flush vault, close ChromaDB, close graph."""
+        """Clean shutdown — flush vault, close ChromaDB. (Graph removed P4b.)"""
         if self._vault:
             self._vault.close_session()
-        if self._graph:
-            self._graph.close()
         self._chroma = None
         self._embedder = None
         self._graph = None

@@ -58,3 +58,17 @@ gods:
   version: 1.0.0
   description: A conversational god of Master Coder
   author: Hephaestus (Pantheon-Core)
+- name: Rheta
+  id: rheta
+  harness: rheta-base.yaml
+  type: conversational
+  version: 1.0.0
+  description: A conversational god of Copywriting rhetoric And persuasion
+  author: Hephaestus (Pantheon-Core)
+- name: Iris
+  id: iris
+  harness: iris-base.yaml
+  type: conversational
+  version: 1.0.0
+  description: A conversational god of God of UI/UX Design
+  author: Hephaestus (Pantheon-Core)

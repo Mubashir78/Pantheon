@@ -111,6 +111,37 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
 
+
+def _profile_query_override(parsed_url) -> str | None:
+    """Return the per-request profile override from `?profile=<name>` if present.
+
+    The Olympus UI sends `?profile=<activeGod>` on every session/project
+    query so the sidebar scopes itself to the *currently selected* god —
+    not whatever the hermes_profile cookie was set to when the user first
+    logged in. Without this override, switching gods in the picker leaves
+    the sidebar showing the cookie's profile (often 'hermes' / 'default')
+    instead of the active one, which looks like "sessions aren't sorting
+    right" when really they're from the wrong god.
+
+    Returns None when no override is set, in which case the caller should
+    fall back to get_active_profile_name() (cookie-based). Empty strings
+    are treated as "no override" so a buggy client cannot accidentally
+    scope to a blank profile and see nothing.
+    """
+    qs = parse_qs(parsed_url.query)
+    raw = (qs.get('profile', [''])[0] or '').strip()
+    if not raw:
+        return None
+    # Reject traversal-shaped or otherwise invalid profile names the same
+    # way _handle_chat_start does, so the override cannot be used to probe
+    # filesystem paths via the WebUI.
+    from api.profiles import _PROFILE_ID_RE, _is_root_profile
+    if raw != 'default' and not _PROFILE_ID_RE.fullmatch(raw):
+        return None
+    if _is_root_profile(raw):
+        return 'default'
+    return raw
+
 # ── SSE app-level heartbeat (#1623) ────────────────────────────────────────
 #
 # Kernel TCP keepalive (server.py setsockopt block) declares a peer dead at
@@ -3222,6 +3253,15 @@ def handle_get(handler, parsed) -> bool:
         return _serve_static(handler, stripped)
 
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
+        # ── Root path redirect to /olympus/ ──
+        # The SPA uses TanStack Router with basepath="/olympus", so hitting /
+        # directly loads the shell HTML/JS but the router finds zero matches
+        # and shows a blank screen. Redirect so routes work as expected.
+        if parsed.path in ("/", "/index.html"):
+            handler.send_response(302)
+            handler.send_header("Location", "/olympus/")
+            handler.end_headers()
+            return True
         try:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
@@ -3571,8 +3611,17 @@ a:hover{{text-decoration:underline}}
         return True
 
     if parsed.path == "/api/auth/me":
-        from api.olympus_users import build_bootstrap
-        from api.auth import parse_cookie, verify_session
+        # /api/auth/me — SPA bootstrap. Returns the current user's
+        # bootstrap payload. Three branches:
+        #   1. Valid session cookie / bearer token → that user
+        #   2. Auth disabled (is_auth_enabled() is False) → default user
+        #      (owner > first active > first) so the SPA can scope
+        #      gods/sessions instead of treating 401 as "no data"
+        #   3. Auth enabled but no valid session → 401 (unchanged)
+        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.olympus_users import (
+            build_bootstrap, get_session_user, get_user, list_users,
+        )
 
         session_val = None
         cookie_val = parse_cookie(handler)
@@ -3585,8 +3634,6 @@ a:hover{{text-decoration:underline}}
                 session_val = token
 
         if session_val:
-            from api.olympus_users import get_session_user, get_user
-
             token_part = session_val.split(".")[0] if "." in session_val else session_val
             uid = get_session_user(token_part)
             if uid:
@@ -3594,6 +3641,28 @@ a:hover{{text-decoration:underline}}
                 if user:
                     j(handler, build_bootstrap(user))
                     return True
+
+        # Auth-off fallback: return the default user so the SPA gets a
+        # real bootstrap payload (gods, sessions, etc. can then be
+        # scoped to this user's permitted_gods).
+        if not is_auth_enabled():
+            users = list_users()
+            default = None
+            for u in users:
+                if u.get("role") == "owner" and u.get("status", "active") == "active":
+                    default = u
+                    break
+            if default is None:
+                for u in users:
+                    if u.get("status", "active") == "active":
+                        default = u
+                        break
+            if default is None and users:
+                default = users[0]
+            if default is not None:
+                j(handler, build_bootstrap(default))
+                return True
+
         j(handler, {"error": "Authentication required"}, status=401)
         return True
 
@@ -4033,6 +4102,12 @@ a:hover{{text-decoration:underline}}
         from api.profiles import get_active_profile_name
         active_profile = get_active_profile_name()
         all_profiles = _all_profiles_query_flag(parsed)
+        # `?profile=<god>` query param overrides the cookie-based profile so
+        # the Olympus sidebar shows the *currently selected* god's sessions
+        # (see _profile_query_override docstring for the full rationale).
+        profile_override = _profile_query_override(parsed)
+        if profile_override:
+            active_profile = profile_override
         if all_profiles:
             scoped = merged
             other_profile_count = 0
@@ -4067,6 +4142,12 @@ a:hover{{text-decoration:underline}}
         active_profile = get_active_profile_name()
         all_projects = load_projects()
         all_profiles = _all_profiles_query_flag(parsed)
+        # `?profile=<god>` query param overrides the cookie-based profile so
+        # the project list scopes to the currently selected god (same as
+        # /api/sessions — see _profile_query_override for rationale).
+        profile_override = _profile_query_override(parsed)
+        if profile_override:
+            active_profile = profile_override
         if all_profiles:
             scoped = all_projects
         else:
@@ -10133,6 +10214,46 @@ def _handle_chat_start(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
+    # Per-profile model default: if the client didn't specify a model, fall
+    # back to the profile's own config.yaml. Without this, the chat handler
+    # uses the *process* default model (whatever HERMES_WEBUI_DEFAULT_MODEL
+    # resolves to), which is wrong for non-default gods like Iris (configured
+    # for `minimax`/`MiniMax-M3`, not `openai-codex`/`gpt-5.4`). Symptom:
+    # picking Iris in the composer caused the agent to attempt a chat with
+    # the wrong provider and fail with errors like "Provider 'openai-codex'
+    # is set but no API key was found". The session may already have a model
+    # stamped by `new_session()` (which falls back to the process default);
+    # we override it here when the client didn't explicitly ask for one.
+    if not body.get("model"):
+        try:
+            from api.profiles import get_profile_default_model
+            _profile_model, _profile_provider = get_profile_default_model(
+                getattr(s, "profile", None) or "default"
+            )
+            # DEBUG: write to /tmp/iris-debug.log so we can trace the flow
+            with open("/tmp/iris-debug.log", "a") as _dbg:
+                _dbg.write(
+                    f"profile={getattr(s, 'profile', None)!r} "
+                    f"profile_model={_profile_model!r} "
+                    f"profile_provider={_profile_provider!r} "
+                    f"s.model_before={getattr(s, 'model', None)!r}\n"
+                )
+            if _profile_model and getattr(s, "model", None) != _profile_model:
+                s.model = _profile_model
+                if _profile_provider and not getattr(s, "model_provider", None):
+                    s.model_provider = _profile_provider
+            with open("/tmp/iris-debug.log", "a") as _dbg:
+                _dbg.write(
+                    f"after patch: s.model={s.model!r} "
+                    f"s.model_provider={getattr(s, 'model_provider', None)!r}\n"
+                )
+        except Exception:
+            logger.debug("get_profile_default_model failed", exc_info=True)
+    with open("/tmp/iris-debug.log", "a") as _dbg:
+        _dbg.write(
+            f"requested_model={body.get('model') or s.model!r} "
+            f"requested_provider={body.get('model_provider') if 'model_provider' in body else getattr(s, 'model_provider', None)!r}\n\n"
+        )
     requested_model = body.get("model") or s.model
     requested_provider = (
         body.get("model_provider")
@@ -10255,6 +10376,21 @@ def _handle_chat_sync(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
+    # Per-profile model default (mirror of the fix in _handle_chat_start):
+    # if no model is supplied by the client or the session, fall back to
+    # the profile's own config.yaml. See chat_start for full rationale.
+    if not body.get("model") and not getattr(s, "model", None):
+        try:
+            from api.profiles import get_profile_default_model
+            _profile_model, _profile_provider = get_profile_default_model(
+                getattr(s, "profile", None) or "default"
+            )
+            if _profile_model:
+                s.model = _profile_model
+                if _profile_provider and not getattr(s, "model_provider", None):
+                    s.model_provider = _profile_provider
+        except Exception:
+            logger.debug("get_profile_default_model failed", exc_info=True)
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
         model, model_provider = _resolve_compatible_session_model_state(

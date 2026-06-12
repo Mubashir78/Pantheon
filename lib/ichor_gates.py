@@ -414,12 +414,24 @@ class LogicGate(BaseGate):
 
     Cap:
         3 interventions per session, then pass-through (prevents death spiral).
+
+    P2a: 60s dedup window per path — skip re-validation if already checked.
+    P2b: 30s write debounce — only validate last write in a burst (3+ writes
+         in window → only check the one with highest offset/most recent).
     """
 
     name = "logic_gate"
 
+    DEDUP_WINDOW = 60   # seconds
+    DEBOUNCE_WINDOW = 30  # seconds
+    BURST_THRESHOLD = 3   # writes within debounce window to trigger burst mode
+
     def __init__(self):
         self.intervention_count = 0
+        # P2a: path → last check timestamp
+        self._last_check: Dict[str, float] = {}
+        # P2b: path → list of (timestamp, size_hint) for debounce tracking
+        self._write_burst: Dict[str, List[float]] = {}
 
     def _detect_language(self, path: str) -> Optional[str]:
         return SUPPORTED_LANGUAGES.get(Path(path).suffix.lower())
@@ -504,6 +516,30 @@ class LogicGate(BaseGate):
         )
         if not path or not content:
             return None
+
+        # P2b: burst tracking happens BEFORE dedup so we can detect rapid
+        # writes that the dedup window would otherwise hide.
+        now = time.time()
+        burst = self._write_burst.setdefault(path, [])
+        burst.append(now)
+        # Drop old entries outside the debounce window
+        burst[:] = [t for t in burst if now - t < self.DEBOUNCE_WINDOW]
+        is_burst = len(burst) >= self.BURST_THRESHOLD
+
+        # P2a: dedup window — skip if we already validated this path recently,
+        # UNLESS we're processing the tail of a burst (last write in window).
+        last = self._last_check.get(path, 0.0)
+        if now - last < self.DEDUP_WINDOW and not is_burst:
+            logger.debug("LogicGate: dedup-skip '%s' (%.1fs < %ds)",
+                         path, now - last, self.DEDUP_WINDOW)
+            return None
+        self._last_check[path] = now
+
+        if is_burst:
+            logger.debug("LogicGate: burst tail — validating final of %d writes "
+                         "to '%s'", len(burst), path)
+            self._write_burst[path] = []  # reset for next burst
+        # else: continue normal validation below
 
         lang = self._detect_language(path)
         if not lang:

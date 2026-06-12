@@ -83,7 +83,7 @@
   - Domain auto-detection (infrastructure, development, config, music, writing, design)
   - Jaccard word-set deduplication against last 20 files
   - Decision files saved to `~/pantheon/shared/decisions/{user_id}/`
-  - CONTEXT regeneration cron every 15 min (`inject-shared-context.py`)
+  - CONTEXT regeneration replaced by `shared-context-watcher.service` (inotify, event-driven)
   - System prompt injection via `system_prompt_block()` hook
   - Budget-aware (full items for large models, one-liner for small models)
 

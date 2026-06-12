@@ -1,7 +1,7 @@
 """Ichor Phase 4 — The Forge: Self-Adjusting Harness.
 
 The Forge is the meta-learning loop for the RALPH gates. Patterned after
-Hermes Dojo: analyze → identify weakness → adjust → verify → report.
+Phronesis (formerly Hermes Dojo): analyze → identify weakness → adjust → verify → report.
 
 The Forge reads intervention logs from `~/.hermes/ichor/forge/all.jsonl`,
 detects patterns (over-blocking gates, missing keywords, underused tools,
@@ -449,7 +449,7 @@ class ForgeSmith:
     """Reads forge findings and produces actionable changes.
 
     The smith doesn't edit files directly — it outputs structured patches
-    that can be reviewed and applied. This matches the Dojo pattern of
+    that can be reviewed and applied. This matches the Phronesis pattern of
     "present findings, ask before applying."
     """
 

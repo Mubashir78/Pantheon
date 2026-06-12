@@ -595,6 +595,64 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+# ── Profile config.yaml accessors ────────────────────────────────────────────
+#
+# The web UI must know which model+provider a god's profile is configured to
+# use so that picking a god in the chat composer routes the message to the
+# right backend. Without this, the chat handler falls back to the *process*
+# default (whatever HERMES_WEBUI_DEFAULT_MODEL / catalog['default_model']
+# resolves to), which is usually wrong for non-default gods (e.g. Iris is
+# configured for `minimax`/`MiniMax-M3`, but the process default is
+# `openai-codex`/`gpt-5.4`). The result was that selecting Iris in the
+# composer caused the agent to attempt a chat with the wrong provider and
+# fail with errors like "Provider 'openai-codex' is set but no API key was
+# found".
+
+def get_profile_default_model(name: str) -> tuple[str, str | None]:
+    """Return (default_model, default_provider) for a profile.
+
+    Reads ``<profile_home>/config.yaml`` and returns the ``model.default`` and
+    ``model.provider`` keys. Returns ``("", None)`` when the profile is
+    unknown, the config is missing/malformed, or the model block is absent.
+
+    Safe to call from per-request context (no env mutation, no caching —
+    config files are tiny and only read once per chat-start).
+    """
+    try:
+        home = get_hermes_home_for_profile(name)
+    except Exception:
+        return ("", None)
+    if not home or not isinstance(home, Path):
+        return ("", None)
+    cfg_path = home / "config.yaml"
+    if not cfg_path.exists():
+        return ("", None)
+    try:
+        import yaml as _yaml
+        cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        logger.debug("Failed to read %s for profile default model", cfg_path, exc_info=True)
+        return ("", None)
+    if not isinstance(cfg, dict):
+        return ("", None)
+    model_block = cfg.get("model")
+    if not isinstance(model_block, dict):
+        return ("", None)
+    default = str(model_block.get("default") or "").strip()
+    provider = model_block.get("provider")
+    provider = str(provider).strip() if provider else None
+    if not default:
+        return ("", provider or None)
+    # If the provider block has its own default_model, prefer the more specific one
+    if provider and isinstance(cfg.get("providers"), dict):
+        prov_block = cfg["providers"].get(provider)
+        if isinstance(prov_block, dict):
+            prov_default = str(prov_block.get("default_model") or "").strip()
+            if prov_default:
+                default = prov_default
+    return (default, provider or None)
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',

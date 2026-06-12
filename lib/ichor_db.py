@@ -5,8 +5,93 @@ All event storage, retrieval, and search operations for the Pantheon system.
 """
 
 import os
+import re
 import sqlite3
 from typing import Any, Optional
+
+
+# Canonical event types. Kept in sync with TYPE_META in ichor_brief.py.
+# Single source of truth here; ichor_brief.py imports from this module.
+VALID_EVENT_TYPES: frozenset[str] = frozenset({
+    "blocker",
+    "commitment",
+    "decision",
+    "follow_up",
+    "correction",
+    "insight",
+    "fact",
+    "preference",
+    "reference",
+})
+
+
+# ── Tiered-context generation (B1, per marvin-memory-upgrade-handoff-2026-06-10) ──
+# Heuristics for deriving L0 (brief) and L1 (outline) from raw text. The rules
+# are intentionally simple — first-sentence / first-N-chars. The Tier A path
+# (B2) will refine this with an optional LLM upgrade if the heuristic is too
+# lossy. See gate-b1-from-schema-to-tiered in the handoff doc.
+
+_BRIEF_MAX = 100   # L0 ceiling
+_OUTLINE_MAX = 500  # L1 ceiling
+
+# Sentence-boundary splitter: ., !, ? followed by whitespace + uppercase or end.
+# Won't catch every edge case (Mr., e.g., etc.) but is good enough for the
+# heuristic; full sentence-tokenization is overkill at L0.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9'\"])")
+
+
+def _first_sentence(text: str) -> str:
+    """Return the first non-empty sentence, stripped of surrounding whitespace."""
+    text = text.strip()
+    if not text:
+        return ""
+    parts = _SENTENCE_SPLIT.split(text, maxsplit=1)
+    return parts[0].strip()
+
+
+def auto_generate_tiers(raw_text: str) -> tuple[str, str]:
+    """Generate brief (L0) and outline (L1) from raw text heuristically.
+
+    Heuristic rules (per build-brief.md Phase 1 / P1b):
+      - brief = first non-empty sentence, capped at 100 chars
+      - outline = first 500 chars of cleaned text
+      - If raw_text < 100 chars: brief = raw_text, outline = raw_text
+      - If raw_text < 500 chars: brief = first 50%, outline = raw_text
+      - If raw_text is None or empty: returns ("(no content)", "(no content)")
+        so brief/outline are never NULL/empty in the DB.
+
+    Returns:
+        (brief, outline) — both strings, never empty if input was provided
+        (None, "" or whitespace all return the placeholder).
+    """
+    if raw_text is None or not raw_text:
+        return ("(no content)", "(no content)")
+    text = raw_text.strip()
+    if not text:
+        return ("(no content)", "(no content)")
+
+    n = len(text)
+    if n < _BRIEF_MAX:
+        # Short content: both tiers carry the same text (no summarization possible).
+        return (text, text)
+
+    first = _first_sentence(text)
+    # Brief: first sentence, capped
+    if len(first) > _BRIEF_MAX:
+        # Cut at word boundary, then add ellipsis
+        cut = first[:_BRIEF_MAX].rsplit(" ", 1)[0]
+        brief = (cut or first[:_BRIEF_MAX]).rstrip(",;:.- ") + "…"
+    else:
+        brief = first
+
+    # Outline: first 500 chars of cleaned text
+    outline = text[:_OUTLINE_MAX]
+    if len(text) > _OUTLINE_MAX:
+        # Cut at word boundary
+        cut = outline.rsplit(" ", 1)[0]
+        outline = (cut or outline).rstrip(",;:.- ") + "…"
+
+    return (brief, outline)
 
 
 class IchorDB:
@@ -15,6 +100,15 @@ class IchorDB:
     Provides CRUD operations for ichor_events and FTS5 full-text search,
     with automatic schema initialization on first connect.
     """
+
+    def auto_generate_tiers(self, raw_text: str) -> tuple[str, str]:
+        """Instance-method wrapper around the module-level auto_generate_tiers.
+
+        Provided so the spec's Gate B1 check (`db.auto_generate_tiers(...)`)
+        works as written. Logic is identical — the module function is the
+        single source of truth and the instance method just delegates.
+        """
+        return auto_generate_tiers(raw_text)
 
     def __init__(self, db_path: str = "~/.hermes/ichor.db"):
         """Initialize the Ichor database manager.
@@ -77,9 +171,17 @@ class IchorDB:
     ) -> int:
         """Insert a new event into the database.
 
+        Validates event_type against the canonical VALID_EVENT_TYPES set
+        defined at module level. Raises sqlite3.IntegrityError (rather than
+        a custom exception) so callers can catch the standard SQLite error
+        type and the test suite's `pytest.raises(sqlite3.IntegrityError)`
+        contract remains stable.
+
         Args:
             session_id: Identifier for the source god session.
-            event_type: One of 'decision', 'commitment', 'preference', 'fact', 'correction'.
+            event_type: One of VALID_EVENT_TYPES (see module constant):
+                blocker, commitment, decision, follow_up, correction,
+                insight, fact, preference, reference.
             subject: The subject of the event (who or what the event is about).
             predicate: Optional relationship/predicate describing the event.
             object: Optional object of the relationship.
@@ -94,8 +196,14 @@ class IchorDB:
             The row ID of the newly inserted event.
 
         Raises:
+            sqlite3.IntegrityError: If event_type is not in VALID_EVENT_TYPES.
             sqlite3.Error: If the insert fails.
         """
+        if event_type not in VALID_EVENT_TYPES:
+            raise sqlite3.IntegrityError(
+                f"Invalid event_type '{event_type}'. "
+                f"Must be one of: {sorted(VALID_EVENT_TYPES)}"
+            )
         conn = self.connect()
         # Dynamic column list — include direction/peer_god if provided
         columns = [

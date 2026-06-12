@@ -110,6 +110,23 @@ def _get_hermes_home() -> Path:
         return Path.home() / ".hermes"
 
 
+def _get_global_hermes_home() -> Path:
+    """Return the GLOBAL ~/.hermes home (not the per-profile copy).
+
+    Provider API keys (OPENCODE_GO_API_KEY, ANTHROPIC_API_KEY, etc.) are
+    written to ~/.hermes/.env and read by every profile + the live LLM
+    clients. The gateway scopes HERMES_HOME to a per-profile directory
+    under the gateway, so writing keys to the per-profile .env leaves
+    them invisible to everything else. This helper climbs two levels
+    when we land inside .../profiles/<name>/ so the write goes to the
+    real shared .env.
+    """
+    active = _get_hermes_home()
+    if active.parent.name == "profiles":
+        return active.parent.parent
+    return active
+
+
 def _load_env_file(env_path: Path) -> dict[str, str]:
     """Read key=value pairs from a .env file."""
     values: dict[str, str] = {}
@@ -855,7 +872,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
         if len(api_key) < 8:
             return {"ok": False, "error": "API key appears too short."}
 
-    env_path = _get_hermes_home() / ".env"
+    env_path = _get_global_hermes_home() / ".env"
     try:
         _write_env_file(env_path, {env_var: api_key})
     except ValueError as exc:

@@ -122,27 +122,27 @@ def _freshness_score(hours: float) -> float:
 def score_event(ev: Dict[str, Any]) -> float:
     """Compute a composite relevance score for an event.
 
+    Phase 1 (Ichor consolidation): delegates the actual scoring to
+    lib.ichor_score.compute_score() (unified 5-factor formula). Adds
+    a small repetition boost (0.0-0.05) on top, since query-less recall
+    is repetition-sensitive in a way that the unified formula is not.
+
     Args:
         ev: Event dict from ichor_events (must have event_type, confidence,
-            created_at, and optionally occurrences).
+            created_at, importance, trust, and optionally occurrences).
 
     Returns:
         Float score 0.0-1.0 where higher = more relevant.
     """
-    confidence = ev.get("confidence", 0.5)
-    hours = _hours_ago(ev.get("created_at", ""))
-    freshness = _freshness_score(hours)
-    priority = TYPE_PRIORITY.get(ev.get("event_type", ""), 0.50)
+    from lib.ichor_score import compute_score as _compute
+    unified = _compute(ev)  # 0.0..100.0
+    base = unified / 100.0  # 0.0..1.0
     repetition = min(ev.get("occurrences", 1), 5) / 5.0
-
-    score = (
-        confidence * W_CONFIDENCE
-        + freshness * W_FRESHNESS
-        + priority * W_PRIORITY
-        + repetition * W_REPETITION
-    )
-
-    return round(score, 3)
+    # Repetition is a 0-5% boost on the unified score. Capped because
+    # the unified formula already accounts for access-boosted importance
+    # which correlates with retrieval count over time.
+    repetition_boost = repetition * 0.05
+    return round(min(1.0, base + repetition_boost), 3)
 
 
 # ---------------------------------------------------------------------------

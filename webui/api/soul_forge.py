@@ -50,6 +50,72 @@ _FORGE_SESSIONS: dict[str, dict] = {}
 
 SOUL_MD_RE = re.compile(r"```markdown\s*\n(.*?)```", re.DOTALL)
 
+
+def _resolve_active_default_model() -> str:
+    """Resolve the architect's preferred default model for new gods.
+
+    The Soul Forge's Phase 4 question needs a default-model recommendation
+    that matches what the architect actually wants their new gods to run
+    on. Reading from ``~/.hermes/config.yaml`` is unreliable because the
+    global ``model.default`` is often the *runtime* default (``opencode-go/
+    deepseek-v4-flash``) used for one-off CLI work, NOT the architect's
+    preferred model for new gods. Instead we look at the user-facing
+    "marvin" profile (the default chat profile) — that's the model the
+    architect sees and uses day-to-day.
+
+    Resolution order:
+      1. The ``marvin`` profile's config.yaml — the architect's chat default
+      2. Any user-named custom god that has an explicit model section
+      3. ``~/.hermes/config.yaml`` (global default)
+      4. ``minimax/MiniMax-M3`` (last-resort fallback)
+
+    Returns a ``provider/name`` string the runtime can parse.
+    """
+    import yaml
+
+    def _read_model_from(cfg_path: Path) -> tuple[str, str] | None:
+        if not cfg_path.is_file():
+            return None
+        try:
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            logger.debug("Failed to read %s: %s", cfg_path, e)
+            return None
+        model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
+        provider = str(model_cfg.get("provider", "")).strip()
+        name = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+        if provider and name:
+            return (provider, name)
+        return None
+
+    profiles_dir = Path.home() / ".hermes" / "profiles"
+
+    # 1. The marvin profile (the default chat profile for the architect).
+    pair = _read_model_from(profiles_dir / "marvin" / "config.yaml")
+    if pair:
+        return f"{pair[0]}/{pair[1]}"
+
+    # 2. Any user-named custom god with an explicit model section.
+    #    Look in alphabetical order so the choice is stable.
+    if profiles_dir.is_dir():
+        for entry in sorted(profiles_dir.iterdir(), key=lambda p: p.name):
+            if not entry.is_dir() or entry.name in ("marvin", "default"):
+                continue
+            pair = _read_model_from(entry / "config.yaml")
+            if pair:
+                return f"{pair[0]}/{pair[1]}"
+
+    # 3. The global config.
+    pair = _read_model_from(Path.home() / ".hermes" / "config.yaml")
+    if pair:
+        return f"{pair[0]}/{pair[1]}"
+
+    # 4. Hardcoded last-resort.
+    return "minimax/MiniMax-M3"
+
+
+_ACTIVE_DEFAULT_MODEL = _resolve_active_default_model()
+
 # ── System Prompt ──────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Hephaestus, god of the forge — builder, engineer, and architect of the Pantheon. You forge the SOUL.md files — the identity documents of new gods.
@@ -72,7 +138,7 @@ Each question below is a separate turn. Do NOT combine questions. Do NOT move on
 
 1. **Personality / Voice** (Phase 2) — How should this god feel to talk to? (collaborative partner, autonomous executor, mentor, playful muse, terse, etc.)
 2. **Filesystem boundaries** (Phase 3) — Confirm allowed/off-limits paths. Defaults: `~/pantheon/` + `~/athenaeum/` allowed; system commands + other paths off-limits.
-3. **Model** (Phase 4) — Which model should this god primarily use? (default: `opencode/deepseek-v4-flash`; alternative: `gpt-5`, `claude-sonnet-4.6`, `minimax/MiniMax-M3` — recommend one and explain why)
+3. **Model** (Phase 4) — Which model should this god primarily use? (default: `{default_model}` — the architect's currently-active model; alternatives: `gpt-5`, `claude-sonnet-4.6`, recommend one and explain why)
 4. **Knowledge bases** (Phase 4) — Should this god read any codex in `~/athenaeum/`? (default: own `Codex-God-{{name}}/` only; the user can opt into others)
 5. **Skills** (Phase 4) — What skills should this god load? (default: `auto-compact-topic-shift`, `pantheon-bridge`; user can add domain-specific ones like `plan`, `github-code-review`, `systematic-debugging`)
 6. **Schedule** (Phase 4) — When should this god run? (default: on-demand; user can opt into cron)
@@ -80,7 +146,7 @@ Each question below is a separate turn. Do NOT combine questions. Do NOT move on
 After all 6 questions are answered (or the user explicitly says "draft it now"), present the complete SOUL.md draft inside a `markdown` code block (Phase 5).
 
 ### Phase 1 — Confirm the Domain (one quick sentence)
-Acknowledge the god's name and stated domain in one sentence, then move to Phase 2. Do NOT explore the domain in depth here — the user already gave you the domain, and you have a research document if a concept was provided.
+Acknowledge the god's name and stated domain in one sentence, then move to Phase 2. Do NOT explore the domain in depth here — the user already gave you the domain, and you have a research document if one was provided.
 
 ### Phase 2 — Personality / Voice (FIRST mandatory question)
 Ask how it should feel to talk to this god. Are they a collaborative partner (like Hephaestus), an autonomous executor, a mentor, or a playful muse? Wait for the user's answer before moving on.
@@ -93,7 +159,7 @@ Propose sensible defaults for filesystem access, then ask what to change.
 
 ### Phase 4 — Operational Quick-Hits (one at a time)
 Ask these four questions in order, one turn each. Do NOT bundle them as a "propose defaults" batch — each is its own mandatory question:
-- **Model:** which model should this god use? (default: `opencode/deepseek-v4-flash` via LiteLLM)
+- **Model:** which model should this god use? (default: `{default_model}` — inherited from the architect's active session)
 - **Knowledge bases:** which codex(es) in `~/athenaeum/` should this god read? (default: own `Codex-God-{{name}}/` only)
 - **Skills:** which skills should this god load? (default: `auto-compact-topic-shift`, `pantheon-bridge`)
 - **Schedule:** when should this god run? (default: on-demand; alternative: cron)
@@ -344,7 +410,16 @@ def _call_llm(messages: list[dict], max_tokens: int = 8192) -> str | None:
 
 def _build_messages(god_name: str, god_domain: str, history: list[dict], user_msg: str | None = None) -> list[dict]:
     """Build the full messages array for an LLM call."""
-    system = SYSTEM_PROMPT.format(god_name=god_name, god_domain=god_domain)
+    # Resolve the architect's currently-active model as the Soul Forge's
+    # default-model recommendation so new gods inherit the active session's
+    # provider/model instead of always defaulting to the legacy
+    # ``opencode/deepseek-v4-flash`` fallback (which pointed at the wrong
+    # provider key — see MEMORY #1120 / #1568).
+    system = SYSTEM_PROMPT.format(
+        god_name=god_name,
+        god_domain=god_domain,
+        default_model=_ACTIVE_DEFAULT_MODEL,
+    )
     messages = [{"role": "system", "content": system}]
     for h in history:
         messages.append(h)
