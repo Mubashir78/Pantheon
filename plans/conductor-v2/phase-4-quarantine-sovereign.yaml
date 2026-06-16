@@ -1,11 +1,11 @@
 plan_id: phase-4-quarantine-sovereign
 parent: conductor-v2
 status: in_progress
-current_step: "4.final"
-next_step: null
-steps_total: 9
+current_step: "4.6.briefs.brief_1_of_3"
+next_step: "4.6.briefs.brief_2_of_3"
+steps_total: 10
 steps_done: 7
-steps_pending: 2
+steps_pending: 3
 gods_involved: [marvin, thoth, hephaestus]
 
 steps:
@@ -90,27 +90,29 @@ steps:
       - "6 hephaestus .archive/ SKILL.md (capture-idea, js-regex-escaping, pantheon-god-bot-setup, pantheon-mcp-server, pantheon-system-migration, pantheon-wsl-networking)"
   - id: "4.6"
     title: "Spec Part 1+3 (YAML guardrails + workflow validator) — defense-in-depth"
-    status: pending
-    deferrable: true
+    status: in_progress
     god: hephaestus
     qa: thoth
     briefs_planned: 3
     briefs:
-      - brief_1_of_3: "Build deliverable: add operator_approval_required: true to deploy-feature.yaml:notify-enterprise"
-      - brief_2_of_3: "Dependency-ordered follow-on: add workflow YAML validator at load time"
-      - brief_3_of_3: "Verification: craft a workflow that bypasses the regex → load → expect hard fail"
+      - brief_1_of_3: "Build deliverable: add operator_approval_required: true to deploy-feature.yaml:notify-enterprise step (the sovereign outbound gate trigger) — small change, locks the contract"
+      - brief_2_of_3: "Dependency-ordered follow-on: add workflow YAML validator at load time — new module pantheon/conductor/v2/workflow_validator.py (load-time check that fails loud on malformed sovereign-outbound steps) + tests"
+      - brief_3_of_3: "Verification: craft a workflow that bypasses the regex → load → expect hard fail. Plus: full v2 suite 246+/1-skip/0-fail (was 234/1/0 after 4.8)"
     success_criteria:
       - "Workflows with sovereign subjects + no operator_approval_required fail to load with a clear error"
-    verification: "Craft a workflow that bypasses the regex (different subject shape) → load → expect hard fail"
+      - "deploy-feature.yaml:operator_approval_required:true on notify-enterprise locks the breach pattern at the workflow layer"
+    verification: "Craft a workflow that bypasses the regex (different subject shape) → load → expect hard fail; load all 6 existing workflows and confirm no regressions"
     out_of_scope:
       - "The engine regex (already shipped, works)"
       - "Runtime tokens (already shipped, works)"
-    reversibility: "git revert of deploy-feature.yaml and the validator"
-    deferral_reason: "Engine guard already catches the breach shape via regex. This is defense-in-depth, not blocking."
+      - "Step 4.9 (cli_tool step type) — separate brief"
+    reversibility: "git revert of deploy-feature.yaml and the validator module + tests"
+    deferral_reason: null
     files_touched_planned:
-      - "pantheon/conductor/workflows/deploy-feature.yaml (add god, gates, operator_approval_required to notify-enterprise step)"
+      - "pantheon/conductor/workflows/deploy-feature.yaml (add operator_approval_required: true to notify-enterprise step)"
       - "NEW: pantheon/conductor/v2/workflow_validator.py (load-time check)"
-      - "pantheon/conductor/v2/tests/test_workflow_validator.py (lock-in)"
+      - "NEW: pantheon/conductor/v2/tests/test_workflow_validator.py (lock-in)"
+      - "pantheon/plans/conductor-v2/phase-4-quarantine-sovereign.yaml (status updates)"
   - id: "4.7"
     title: "parallel + merge step types (operator-approved scope cut from cli-orchestration spec)"
     status: DONE
@@ -182,12 +184,43 @@ steps:
     latent_bugs_logged_for_4_final:
       - "_latest_branch_output's `declared_output` parameter is defined but _exec_parallel at L1476 never passes it (1-line fix)"
       - "Branch _exec_god_dispatch → _advance on single-branch sub-workflow marks parent workflow status=completed prematurely (Test 2+3 stability workarounds documented; bigger refactor for 4.final)"
+  - id: "4.9"
+    title: "cli_tool step type (Phase 1 of Thoth's cli-orchestration spec) — best-of-N beyond god-vs-god"
+    status: pending
+    god: marvin
+    qa: thoth
+    briefs_planned: 3
+    briefs:
+      - brief_1_of_3: "Build deliverable: cli_tool step type in engine.py — extend WorkflowStep dataclass with tool/input/tool_metadata fields, implement _exec_cli_tool in new module pantheon/conductor/v2/cli_tool.py (subprocess invocation, prompt→args/stdin transformation per tool's args_template, capture stdout/stderr/exit_code/duration, parse output_format json/text/stream-json into structured output, session_id resume, retry logic per on_error), extend _execute_step dispatch — ~300 LOC engine.py + ~200 LOC cli_tool.py + ≥12 tests"
+      - brief_2_of_3: "Dependency-ordered follow-on: cli_tools.yaml config at pantheon/conductor/config/cli_tools.yaml — register v1 tool set (claude-code, codex, gemini-cli) with command, args_template, output_format, session_id_flag, env, timeout_default, max_concurrent fields; load at engine startup; tests for config loading + tool lookup"
+      - brief_3_of_3: "Verification: subprocess lifecycle test, error handling test (non-zero exit), timeout test, resume test, retry test, plus hand-test a deploy-feature.yaml variant that uses cli_tool instead of god_dispatch — ≥12 tests, full v2 suite 246+/1-skip/0-fail"
+    success_criteria:
+      - "cli_tool step type: spawns subprocess, captures output, fails on non-zero exit, retries per on_error config"
+      - "Session resume: passes session_id to tool's session_id_flag, loads prior session context"
+      - "Tool registration: cli_tools.yaml config loaded at engine startup, 3 v1 tools registered (claude-code, codex, gemini-cli)"
+      - "Test count: ≥12 new tests in test_cli_tool.py"
+      - "Backwards compat: existing workflows still load and dispatch"
+    verification: "PYTHONPATH=/home/konan/pantheon ~/.hermes/hermes-agent/venv/bin/pytest conductor/v2/tests/ -q → 246+/1-skip/0-fail (was 234/1/0 after 4.8); load all 6 existing workflows via Workflow.from_dict and confirm no parse errors; hand-test a workflow with a cli_tool step against a mock tool"
+    out_of_scope:
+      - "WebSocket live-observability stream (Phase 2 of spec, separate brief)"
+      - "Conductor GUI integration (Phase 5 of spec, Iris)"
+      - "Worked-example workflows (Phase 6 of spec, Thoth)"
+      - "stream: true live streaming (Phase 2 of spec)"
+      - "Step 4.final (Phase 4 closure review)"
+    reversibility: "Revert WorkflowStep dataclass additions + _execute_step dispatch extension + delete cli_tool.py + delete cli_tools.yaml. Zero data state changes. No existing workflows use the cli_tool step type."
+    deferral_reason: null
+    files_touched_planned:
+      - "pantheon/conductor/v2/engine.py (WorkflowStep cli_tool fields, _exec_cli_tool dispatch)"
+      - "NEW: pantheon/conductor/v2/cli_tool.py (subprocess invocation + output parsing + session resume + retry)"
+      - "NEW: pantheon/conductor/v2/tests/test_cli_tool.py (≥12 tests)"
+      - "NEW: pantheon/conductor/config/cli_tools.yaml (v1 tool set: claude-code, codex, gemini-cli)"
+      - "pantheon/plans/conductor-v2/phase-4-quarantine-sovereign.yaml (this entry)"
   - id: "4.final"
     title: "Phase 4 final review"
     status: pending
     type: review
     god: hermes (no god dispatch — meta-step)
-    trigger: "All 4.1-4.8 DONE"
+    trigger: "All 4.1-4.9 DONE"
     output: "reviews/phase-4-quarantine-sovereign-final-review.md"
     output_format:
       section_1_holes: "Step statuses are DONE, but the actual deliverable is missing or wrong"
@@ -251,9 +284,10 @@ body: |
   | 4.3 | Profile-wide symlink audit (95 skills) | DONE | marvin | thoth | ~50m (build+QA) |
   | 4.4 | Profile-bootstrap hook (prevent new skills drifting) | pending | marvin | thoth | ~30m est |
   | 4.5 | Heuristic .archive/ cleanup (6 hephaestus entries) | pending | hephaestus | thoth | ~30m est |
-  | 4.6 | YAML guardrails + validator (defense-in-depth) | pending, deferrable | hephaestus | thoth | ~1-2h est |
+  | 4.6 | YAML guardrails + validator (defense-in-depth) | in_progress | hephaestus | thoth | ~1-2h est |
   | 4.7 | parallel + merge step types (operator-scoped) | DONE | marvin | thoth | 234/1/0 verified |
   | 4.8 | Step 4.7 fix-up + parallel-build-plan consolidation | DONE | marvin | thoth | 234/1/0 verified |
+  | 4.9 | cli_tool step type (Phase 1 of cli-orchestration spec) | pending | marvin | thoth | ~500 LOC + 12 tests est |
   | 4.final | Phase 4 final review | pending | hermes (meta-step) | n/a | ~20m est |
 
   ## Test counts
