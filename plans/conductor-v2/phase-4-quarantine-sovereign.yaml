@@ -1,11 +1,11 @@
 plan_id: phase-4-quarantine-sovereign
 parent: conductor-v2
 status: in_progress
-current_step: "4.9.briefs.brief_1_of_3"
-next_step: "4.9.briefs.brief_2_of_3"
+current_step: "4.final"
+next_step: null
 steps_total: 10
-steps_done: 8
-steps_pending: 2
+steps_done: 9
+steps_pending: 1
 gods_involved: [marvin, thoth, hephaestus]
 
 steps:
@@ -187,20 +187,22 @@ steps:
       - "Branch _exec_god_dispatch → _advance on single-branch sub-workflow marks parent workflow status=completed prematurely (Test 2+3 stability workarounds documented; bigger refactor for 4.final)"
   - id: "4.9"
     title: "cli_tool step type (Phase 1 of Thoth's cli-orchestration spec) — best-of-N beyond god-vs-god"
-    status: pending
+    status: DONE
+    completed_at: "2026-06-16"
+    verdict: SHIP
     god: marvin
     qa: thoth
     briefs_planned: 3
     briefs:
-      - brief_1_of_3: "Build deliverable: cli_tool step type in engine.py — extend WorkflowStep dataclass with tool/input/tool_metadata fields, implement _exec_cli_tool in new module pantheon/conductor/v2/cli_tool.py (subprocess invocation, prompt→args/stdin transformation per tool's args_template, capture stdout/stderr/exit_code/duration, parse output_format json/text/stream-json into structured output, session_id resume, retry logic per on_error), extend _execute_step dispatch — ~300 LOC engine.py + ~200 LOC cli_tool.py + ≥12 tests"
-      - brief_2_of_3: "Dependency-ordered follow-on: cli_tools.yaml config at pantheon/conductor/config/cli_tools.yaml — register v1 tool set (claude-code, codex, gemini-cli) with command, args_template, output_format, session_id_flag, env, timeout_default, max_concurrent fields; load at engine startup; tests for config loading + tool lookup"
-      - brief_3_of_3: "Verification: subprocess lifecycle test, error handling test (non-zero exit), timeout test, resume test, retry test, plus hand-test a deploy-feature.yaml variant that uses cli_tool instead of god_dispatch — ≥12 tests, full v2 suite 246+/1-skip/0-fail"
+      - brief_1_of_3: "Build deliverable: cli_tool step type in engine.py — extend WorkflowStep dataclass with tool/input/tool_metadata fields, implement _exec_cli_tool in new module pantheon/conductor/v2/cli_tool.py (subprocess invocation, prompt→args/stdin transformation per tool's args_template, capture stdout/stderr/exit_code/duration, parse output_format json/text/stream-json into structured output, session_id resume, retry logic per on_error), extend _execute_step dispatch — ~300 LOC engine.py + ~200 LOC cli_tool.py + ≥12 tests — SHIPPED"
+      - brief_2_of_3: "Dependency-ordered follow-on: cli_tools.yaml config at pantheon/conductor/config/cli_tools.yaml — register v1 tool set (claude-code, codex, gemini-cli) with command, args_template, output_format, session_id_flag, env, timeout_default, max_concurrent fields; load at engine startup; tests for config loading + tool lookup — SHIPPED"
+      - brief_3_of_3: "Verification: subprocess lifecycle test, error handling test (non-zero exit), timeout test, resume test, retry test, plus hand-test a deploy-feature.yaml variant that uses cli_tool instead of god_dispatch — ≥12 tests, full v2 suite 246+/1-skip/0-fail — SHIPPED"
     success_criteria:
-      - "cli_tool step type: spawns subprocess, captures output, fails on non-zero exit, retries per on_error config"
-      - "Session resume: passes session_id to tool's session_id_flag, loads prior session context"
-      - "Tool registration: cli_tools.yaml config loaded at engine startup, 3 v1 tools registered (claude-code, codex, gemini-cli)"
-      - "Test count: ≥12 new tests in test_cli_tool.py"
-      - "Backwards compat: existing workflows still load and dispatch"
+      - "cli_tool step type: spawns subprocess, captures output, fails on non-zero exit, retries per on_error config — VERIFIED"
+      - "Session resume: passes session_id to tool's session_id_flag, loads prior session context — VERIFIED"
+      - "Tool registration: cli_tools.yaml config loaded at engine startup, 3 v1 tools registered (claude-code, codex, gemini-cli) — VERIFIED"
+      - "Test count: ≥12 new tests in test_cli_tool.py — VERIFIED"
+      - "Backwards compat: existing workflows still load and dispatch — VERIFIED"
     verification: "PYTHONPATH=/home/konan/pantheon ~/.hermes/hermes-agent/venv/bin/pytest conductor/v2/tests/ -q → 246+/1-skip/0-fail (was 234/1/0 after 4.8); load all 6 existing workflows via Workflow.from_dict and confirm no parse errors; hand-test a workflow with a cli_tool step against a mock tool"
     out_of_scope:
       - "WebSocket live-observability stream (Phase 2 of spec, separate brief)"
@@ -288,7 +290,7 @@ body: |
   | 4.6 | YAML guardrails + validator (defense-in-depth) | DONE | hephaestus | thoth | ~1-2h est |
   | 4.7 | parallel + merge step types (operator-scoped) | DONE | marvin | thoth | 234/1/0 verified |
   | 4.8 | Step 4.7 fix-up + parallel-build-plan consolidation | DONE | marvin | thoth | 234/1/0 verified |
-  | 4.9 | cli_tool step type (Phase 1 of cli-orchestration spec) | pending | marvin | thoth | ~500 LOC + 12 tests est |
+  | 4.9 | cli_tool step type (Phase 1 of cli-orchestration spec) | DONE | marvin | thoth | 285/1/0 verified |
   | 4.final | Phase 4 final review | pending | hermes (meta-step) | n/a | ~20m est |
 
   ## Test counts
