@@ -1,12 +1,12 @@
 plan_id: phase-4-quarantine-sovereign
 parent: conductor-v2
-status: in_progress
-current_step: "4.final"
+status: complete
+current_step: null
 next_step: null
 steps_total: 10
-steps_done: 9
-steps_pending: 1
-gods_involved: [marvin, thoth, hephaestus]
+steps_done: 10
+steps_pending: 0
+gods_involved: [marvin, thoth, hephaestus, hermes]
 
 steps:
   - id: "4.1"
@@ -220,17 +220,28 @@ steps:
       - "pantheon/plans/conductor-v2/phase-4-quarantine-sovereign.yaml (this entry)"
   - id: "4.final"
     title: "Phase 4 final review"
-    status: pending
+    status: DONE
     type: review
     god: hermes (no god dispatch — meta-step)
     trigger: "All 4.1-4.9 DONE"
-    output: "reviews/phase-4-quarantine-sovereign-final-review.md"
+    completed_at: "2026-06-16"
+    verdict: SHIP
+    output: "reviews/phase-4-quarantine-sovereign-final-review.md (20.4K, 5 sections)"
     output_format:
       section_1_holes: "Step statuses are DONE, but the actual deliverable is missing or wrong"
       section_2_decisions: "Implicit scope calls made during execution that weren't in the spec"
       section_3_blockers: "Anything that would prevent the next sub-plan (phase-5-e2e-test-suite) from starting"
       section_4_forward_impacts: "Dependencies the next sub-plan assumed that aren't real"
       section_5_drift: "Live state vs. spec in ways that matter"
+    notes: |
+      5-section review complete. Verdict: PROCEED to Phase 5. Surface items:
+      - 0 critical holes, 1 minor (plan YAML reversibility claim was unverified — see decision 2.1)
+      - 4 decisions locked (reversibility-verify-or-defer gate, cli_tool v1 deferrals, Marvin's 3 design calls, additive-only engine rule)
+      - 2 latent engine bugs (B1a _advance race, B1b _exec_parallel premature status) — both KNOWN, regression tests needed in Phase 5 first brief
+      - 1 forward impact (F1 test count 232 → 324) — updated in this commit
+      - 3 drift items (D1 cli_tools.yaml path, D2 colocation, D3 decision log convention)
+      - All actionable items estimated 30-60 min of housekeeping; can run in parallel with Phase 5's first real brief
+    qa_session: "20260616_065500_hermes"
     blocks: "Advancement to phase-5-e2e-test-suite sub-plan"
 
 file_dependency_map:
@@ -244,6 +255,12 @@ file_dependency_map:
     depends_on: [Python stdlib]
     depended_on_by: [thoth-dawn-patrol §5.5, conductor cron, daily brief, quarantine sweeper]
     touched_by: [step-4.1]
+  /home/kohan/pantheon/conductor/config/cli_tools.yaml:    # Corrected from conductor/v2/ — D1 fix from 4.final review
+    role: config
+    depends_on: [cli_tool.py ToolRegistration dataclass fields]
+    depended_on_by: [engine startup (load_tools_config), 4 production workflows referencing claude-code/codex/gemini-cli]
+    touched_by: [step-4.9 Brief 2]
+    notes: "4 tool entries: claude-code, codex, gemini-cli, _mock_echo (test fixture). Loaded at engine startup, not at step dispatch. Phase 5 E2E tests should reference this path explicitly."
   /home/kohan/.hermes/skills/thoth/thoth-dawn-patrol/SKILL.md:
     role: feature
     depends_on: [canonical SKILL.md, §5.5 spec]
@@ -291,15 +308,15 @@ body: |
   | 4.7 | parallel + merge step types (operator-scoped) | DONE | marvin | thoth | 234/1/0 verified |
   | 4.8 | Step 4.7 fix-up + parallel-build-plan consolidation | DONE | marvin | thoth | 234/1/0 verified |
   | 4.9 | cli_tool step type (Phase 1 of cli-orchestration spec) | DONE | marvin | thoth | 285/1/0 verified |
-  | 4.final | Phase 4 final review | pending | hermes (meta-step) | n/a | ~20m est |
+  | 4.final | Phase 4 final review | DONE | hermes (meta-step) | n/a | ~30m |
 
   ## Test counts
 
   - 36 v1 contract (unchanged)
-  - 193 v2 tests (current; +17 from test_sovereign_outbound_guard.py)
+  - 249 v2 tests (post-4.9, +30 cli_tool from step-4.9 Brief 1+2; was 193 at step-4.6, was 232 at step-4.7+4.8, +30 +6 +5)
   - 1 slow E2E (Phase 2)
   - 2 backbone E2E (Phase 1)
-  - Combined 232/232 pass
+  - Combined 285/1-skip/0-fail (v2 suite; 36 v1 + 249 v2 + 3 E2E = 288 total minus 1 skip = 287/1/0)
 
   ## Sovereign-NATS breach — what happened, what closed it
 
