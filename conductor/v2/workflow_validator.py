@@ -54,6 +54,18 @@ def validate_workflow(workflow: Workflow) -> list[str]:
     Does NOT raise — the caller decides whether to raise or just report.
     """
     violations: list[str] = []
+    # Structural checks first — these short-circuit before the
+    # nats_publish loop so a malformed workflow doesn't get
+    # "approved" by the sovereign-outbound check just because it
+    # has no nats_publish steps. The api_server's PUT handler
+    # relies on this to reject zero-step workflows BEFORE the
+    # file is written (see test_put_rejects_invalid_workflow).
+    if not workflow.steps:
+        violations.append(
+            f"workflow {workflow.id!r} has zero steps — at least one step is required"
+        )
+        # No point checking steps if there are none.
+        return violations
     for step in workflow.steps:
         # Only nats_publish steps with a subject are relevant
         if step.type != "nats_publish" or not step.subject:

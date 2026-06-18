@@ -258,12 +258,29 @@ class TestParseOutput(unittest.TestCase):
             ct._parse_output("json", "not json {at all", "")
         self.assertIn("not valid JSON", str(ctx.exception))
 
-    def test_parse_output_stream_json_raises(self):
-        """Test 12: output_format='stream-json' → CliToolError with deferred msg."""
+    def test_parse_output_stream_json_parses_as_json(self):
+        """Test 12: output_format='stream-json' with valid JSON stdout →
+        {"stream_json": <parsed>}. (A.2 unlock, 2026-06-16: the
+        WebSocket live-observability stream is now implemented;
+        stream-json no longer raises "deferred". The streaming path
+        in _run_cli_tool_streaming builds `parsed` itself; this
+        branch handles the non-streaming case where the tool's
+        final stdout is a JSON document.)
+        """
+        result = ct._parse_output("stream-json", '{"events": [1,2,3]}', "")
+        self.assertIn("stream_json", result)
+        self.assertEqual(result["stream_json"], {"events": [1, 2, 3]})
+
+        # Empty stdout → empty dict
+        empty = ct._parse_output("stream-json", "", "")
+        self.assertEqual(empty, {"stream_json": {}})
+
+        # Invalid JSON → CliToolError with a clear "did you forget stream=True?" hint
         with self.assertRaises(ct.CliToolError) as ctx:
-            ct._parse_output("stream-json", "{}", "")
+            ct._parse_output("stream-json", "not json", "")
         self.assertIn("stream-json", str(ctx.exception))
-        self.assertIn("deferred", str(ctx.exception))
+        self.assertIn("not valid JSON", str(ctx.exception))
+        self.assertIn("stream=True", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------

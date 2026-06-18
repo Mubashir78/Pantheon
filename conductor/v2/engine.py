@@ -695,6 +695,36 @@ class WorkflowRegistry:
         LOG.info(f"loaded {len(self._workflows)} workflows from {self.workflows_dir}")
         return len(self._workflows)
 
+    def reload_workflow(self, workflow_id: str) -> Optional[Workflow]:
+        """Reload a single workflow by id from disk.
+
+        Used by the api_server's PUT /api/workflows/{id} handler to
+        pick up a freshly-saved YAML without re-parsing every other
+        workflow in the directory. Returns the reloaded Workflow on
+        success, or None if no file exists for that id.
+
+        Raises WorkflowValidationError if the file fails load-time
+        validation (the engine would also reject it later, but failing
+        here gives the API caller a clear 400 with the validator's
+        error message rather than a 500 from the engine on the next
+        start_workflow call).
+
+        The previous in-memory copy of the workflow (if any) is REPLACED
+        in-place. Workflows that are currently running (`in_progress`
+        instances) are NOT aborted — they continue with the version of
+        the workflow that was active when they started (the spec's 8.4
+        version-lock contract: the version a running instance uses is
+        captured at start time and never updated mid-run).
+        """
+        path = self.workflows_dir / f"{workflow_id}.yaml"
+        if not path.exists():
+            return None
+        doc = read_yaml(path)
+        wf = Workflow.from_dict(doc, path)
+        self._workflows[wf.id] = wf
+        LOG.info(f"reloaded workflow {wf.id} v{wf.version} from {path}")
+        return wf
+
     def get(self, workflow_id: str) -> Optional[Workflow]:
         return self._workflows.get(workflow_id)
 
@@ -783,7 +813,18 @@ class ConductorEngine:
         pending_dir: Optional[Path] = None,
         state_dir: Optional[Path] = None,
         workflows_dir: Optional[Path] = None,
+        live_stream: Optional["LiveStreamServer"] = None,
     ):
+        # A.2 (2026-06-16): optional WebSocket live-observability server.
+        # When set, the engine emits `step.started/completed/failed` and
+        # `workflow.started/completed` events through the server. When None
+        # (the default), the engine is silent — zero overhead, fully
+        # back-compat with the Step 4.9 Brief 1/2/3 contract.
+        #
+        # Lazy import to keep the v2 engine importable even if aiohttp
+        # is not installed (e.g. minimal CI envs). The live_stream
+        # module is only touched if the caller passes a server.
+        self.live_stream = live_stream
         self.gw = gateway_client
         # Step 1.6 lazy fix: pass the lazy resolvers into the registries
         # explicitly so a `ConductorEngine()` with no kwargs reads the
@@ -814,6 +855,47 @@ class ConductorEngine:
             (self.pending_dir / god).mkdir(parents=True, exist_ok=True)
         self._instances: dict[str, WorkflowInstance] = {}
         self._load_active_instances()
+
+    # ----- A.2 (2026-06-16): live-observability event emission -----
+
+    def _emit_event(
+        self,
+        workflow_id: str,
+        step_id: str,
+        event: str,
+        data: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Emit a single StreamEvent to the live_stream (if configured).
+
+        No-op when `self.live_stream is None` (the default — most
+        callers, including the existing 5 production workflows, don't
+        care about live observability). When set, this schedules the
+        broadcast on the running event loop and returns immediately;
+        we don't await broadcast() because emitting an event is a
+        side-effect of the engine's existing step-execution flow and
+        should not block the executor.
+
+        Errors during broadcast (closed socket, timeout) are logged
+        at debug and swallowed — the engine does not abort a step
+        because the GUI missed an event.
+        """
+        if self.live_stream is None:
+            return
+        # Lazy import keeps the engine importable in envs without
+        # aiohttp (the LiveStreamServer constructor is the only thing
+        # that pulls aiohttp in).
+        from .live_stream import StreamEvent
+        evt = StreamEvent.now(workflow_id, step_id, event, data or {})
+        # Schedule broadcast on the running loop. If no loop is
+        # running (sync code path), broadcast_sync handles the
+        # no-loop case by logging + returning a completed future.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — fall back to best-effort sync dispatch.
+            self.live_stream.broadcast_sync(evt)
+            return
+        asyncio.ensure_future(self.live_stream.broadcast(evt))
 
     # ----- Instance management -----
 
@@ -943,6 +1025,23 @@ class ConductorEngine:
         self._save_instance(inst)
         LOG.info(f"started workflow {wf_id} ({workflow_def_id} v{wf.version}) at step {first_step_id}")
 
+        # A.2 (2026-06-16): emit workflow.started so subscribers can
+        # render "this workflow just began" in the GUI before any step
+        # events flow. The step_id here is the first step (a hint for
+        # the GUI), but the event itself is workflow-scoped.
+        if first_step_id:
+            self._emit_event(
+                wf_id,
+                first_step_id,
+                "workflow.started",
+                {
+                    "definition_id": workflow_def_id,
+                    "definition_version": wf.version,
+                    "initiator": initiator,
+                    "first_step_id": first_step_id,
+                },
+            )
+
         if first_step_id:
             asyncio.create_task(self._execute_step(inst, wf, first_step_id))
         return inst
@@ -967,6 +1066,21 @@ class ConductorEngine:
         inst.status = "in_progress"
         self._save_instance(inst)
 
+        # A.2 (2026-06-16): emit step.started so subscribers see the
+        # step begin. The data payload includes the step type so the
+        # GUI can route to the right renderer (cli_tool steps get the
+        # streaming view, others get a simple status view).
+        self._emit_event(
+            inst.workflow_id,
+            step.id,
+            "step.started",
+            {
+                "step_type": step.type,
+                "god": step.god,
+                "tool": step.tool,
+            },
+        )
+
         try:
             if step.type == "nats_publish":
                 await self._exec_nats_publish(inst, step)
@@ -989,8 +1103,43 @@ class ConductorEngine:
             LOG.exception(f"step {step_id} failed in {inst.workflow_id}: {e}")
             self._record_step_failure(inst, step, str(e))
             self._save_instance(inst)
+            # A.2 (2026-06-16): emit step.failed for the GUI. Data
+            # includes the error message (truncated) for debugging.
+            self._emit_event(
+                inst.workflow_id,
+                step.id,
+                "step.failed",
+                {
+                    "step_type": step.type,
+                    "error": str(e)[:500],
+                    "error_type": type(e).__name__,
+                },
+            )
             if inst.abort_on_fail:
                 self._abort_workflow(inst, f"step {step_id} raised: {e}")
+            return
+
+        # A.2 (2026-06-16): emit step.completed on the implicit
+        # success path. (The explicit per-executor record_step_completion
+        # calls inside each _exec_* method flip the step's status; this
+        # event tells subscribers the step is done, regardless of
+        # which sub-executor handled it.) We pull the final status
+        # from the latest history entry so the event matches the
+        # recorded state.
+        final_status = "completed"
+        for h in reversed(inst.step_history):
+            if h.get("step_id") == step.id:
+                final_status = h.get("status", "completed")
+                break
+        self._emit_event(
+            inst.workflow_id,
+            step.id,
+            "step.completed",
+            {
+                "step_type": step.type,
+                "status": final_status,
+            },
+        )
 
     async def _exec_god_dispatch(
         self, inst: WorkflowInstance, wf: Workflow, step: WorkflowStep
@@ -1331,6 +1480,12 @@ class ConductorEngine:
         # tasks (e.g. a parallel sibling) while the tool runs.
         timeout_s = _parse_duration(step.timeout)
         loop = asyncio.get_event_loop()
+        # A.2 (2026-06-16): if a live_stream server is configured AND
+        # the step opted into streaming (tool_input.stream == True),
+        # pass it through to run_cli_tool so the streaming path takes
+        # over (line-buffered NDJSON broadcast + stream_url in result).
+        # Otherwise run_cli_tool uses the unchanged sync path.
+        want_stream = bool(step.tool_input.get("stream")) and self.live_stream is not None
         result = await loop.run_in_executor(
             None,  # default ThreadPoolExecutor
             lambda: run_cli_tool(
@@ -1338,6 +1493,10 @@ class ConductorEngine:
                 input_dict=step.tool_input,
                 on_error=step.on_error,
                 timeout_s=timeout_s,
+                live_stream=self.live_stream,
+                workflow_id=inst.workflow_id,
+                step_id=step.id,
+                stream=want_stream,
             ),
         )
 
@@ -2184,6 +2343,20 @@ class ConductorEngine:
             inst.current_step = None
             self._save_instance(inst)
             LOG.info(f"workflow {inst.workflow_id} completed")
+
+            # A.2 (2026-06-16): emit workflow.completed so subscribers
+            # can render the terminal state. We use the last step's
+            # id (already finished at this point) for routing.
+            self._emit_event(
+                inst.workflow_id,
+                step.id,
+                "workflow.completed",
+                {
+                    "definition_id": inst.definition_id,
+                    "definition_version": inst.definition_version,
+                    "final_step_id": step.id,
+                },
+            )
             return
         inst.current_step = nxt.id
         self._save_instance(inst)

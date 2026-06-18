@@ -438,14 +438,23 @@ def _parse_output(output_format: str, stdout: str, stderr: str) -> dict[str, Any
                 f"First 200 chars: {stdout[:200]!r}"
             ) from e
     if output_format == "stream-json":
-        # Brief 1 doesn't support stream-json (WebSocket observability
-        # is Brief 2+ / separate). The user sees a clear "deferred"
-        # message rather than a silent half-implementation.
-        raise CliToolError(
-            "output_format=stream-json requires the WebSocket live-observability "
-            "stream (Thoth spec §3), which is deferred to a separate brief. "
-            "For Brief 1, use output_format=text or output_format=json."
-        )
+        # A.2 (2026-06-16): stream-json is now unlocked for the
+        # NON-streaming path. The streaming path (_run_cli_tool_streaming)
+        # builds `parsed` itself from collected events; this branch
+        # is hit when a tool with output_format=stream-json runs
+        # WITHOUT `stream=True` — in that case the captured stdout
+        # IS a JSON document (the tool's last emission), so we
+        # parse it as such. If it's not valid JSON, we surface the
+        # exact first-200-chars for debugging.
+        try:
+            return {"stream_json": json.loads(stdout) if stdout.strip() else {}}
+        except json.JSONDecodeError as e:
+            raise CliToolError(
+                f"output_format=stream-json but stdout is not valid JSON: {e}. "
+                f"Either the tool is not emitting stream-json OR you forgot "
+                f"to pass stream=True to run_cli_tool. "
+                f"First 200 chars: {stdout[:200]!r}"
+            ) from e
     raise CliToolError(f"unknown output_format: {output_format!r}")
 
 
@@ -454,6 +463,13 @@ def run_cli_tool(
     input_dict: dict[str, Any],
     on_error: dict[str, Any],
     timeout_s: float,
+    *,
+    live_stream: Optional["LiveStreamServer"] = None,
+    workflow_id: Optional[str] = None,
+    step_id: Optional[str] = None,
+    stream: bool = False,
+    host: str = "0.0.0.0",
+    port: int = 7700,
 ) -> dict[str, Any]:
     """Run a cli_tool step. Synchronous (called from engine via run_in_executor).
 
@@ -463,6 +479,20 @@ def run_cli_tool(
       3. Parse output per output_format
       4. If exit non-zero, apply on_error.retry policy
       5. Return the structured output (or raise on final failure)
+
+    A.2 streaming params (all keyword-only, all optional):
+      - live_stream: LiveStreamServer instance. When set AND `stream=True`,
+        line-buffered output is broadcast as StreamEvent messages during
+        the run. When None or stream=False, the synchronous
+        `_run_subprocess` path is used unchanged (full back-compat).
+      - workflow_id / step_id: routing keys for the live_stream fan-out
+        (only used when streaming).
+      - stream: explicit opt-in to the streaming path. Defaults False so
+        non-streaming tools are zero-overhead.
+      - host / port: used to build the `stream_url` field in the result
+        when streaming is enabled. Lets the GUI subscribe without
+        needing to know the server's bind address (default: 0.0.0.0:7700
+        per spec §3; tests pass 127.0.0.1 + a random port).
 
     on_error shape (spec §7.3):
       {
@@ -475,13 +505,41 @@ def run_cli_tool(
       }
 
     Returns a dict with the result schema (status, exit_code, duration,
-    stdout, stderr, parsed, tool_metadata). On unrecoverable failure,
-    raises CliToolError (or one of its subclasses).
+    stdout, stderr, parsed, tool_metadata, [stream_url]). On unrecoverable
+    failure, raises CliToolError (or one of its subclasses).
     """
     retry_cfg = on_error.get("retry", {}) or {}
     max_attempts = max(1, int(retry_cfg.get("max_attempts", 1)))  # default: no retry
     backoff = retry_cfg.get("backoff", "none")  # none | fixed | exponential
     backoff_base_seconds = float(retry_cfg.get("backoff_base_seconds", 30))
+
+    # A.2 (2026-06-16): streaming dispatch. When the caller passes
+    # `stream=True` AND a `live_stream` server, we take the async
+    # streaming path that broadcasts each NDJSON line as a StreamEvent.
+    # Otherwise we use the synchronous _run_subprocess path (the
+    # Brief 1/2 behavior) — zero overhead for the 99% of tools that
+    # don't stream.
+    #
+    # `_run_subprocess_stream` is async-only; we run it on the same
+    # default ThreadPoolExecutor that wraps this synchronous function.
+    # The engine calls run_cli_tool via loop.run_in_executor, so the
+    # executor thread is already detached from the event loop — we
+    # cannot `await` directly. We bridge with asyncio.run_coroutine_threadsafe
+    # on a captured loop, or fall back to a fresh asyncio.run if
+    # no loop is set (e.g. tests that call run_cli_tool directly
+    # without a running engine).
+    if stream and live_stream is not None and workflow_id and step_id:
+        return _run_cli_tool_streaming(
+            tool_reg, input_dict, on_error, timeout_s,
+            live_stream=live_stream,
+            workflow_id=workflow_id,
+            step_id=step_id,
+            host=host,
+            port=port,
+            max_attempts=max_attempts,
+            backoff=backoff,
+            backoff_base_seconds=backoff_base_seconds,
+        )
 
     last_error: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
@@ -550,3 +608,483 @@ def run_cli_tool(
     raise last_error or CliToolError(
         f"tool {tool_reg.name!r} failed after {max_attempts} attempts"
     )
+
+
+# ---------------------------------------------------------------------------
+# A.2 (2026-06-16): NDJSON streaming path
+# ---------------------------------------------------------------------------
+#
+# When the caller passes `stream=True` and a `live_stream` server,
+# run_cli_tool dispatches to `_run_cli_tool_streaming` (below), which
+# in turn awaits `_run_subprocess_stream` on a fresh asyncio loop.
+# Each line of stdout is parsed as NDJSON; the resulting dict is
+# mapped to a StreamEvent (via `_ndjson_to_event`) and broadcast on
+# the live_stream server. The final aggregated stdout is also parsed
+# as JSON for the `parsed` field in the result.
+#
+# Spec reference: conductor-cli-orchestration.md §3 (event table) +
+# §2.1.4 (stream-json output format).
+#
+# Design constraint (from the brief): streaming MUST NOT block the
+# synchronous _run_subprocess path. The two paths share ZERO code
+# (different functions, different process models) — non-streaming
+# tools use _run_subprocess unchanged.
+
+# Map a tool's stream_format to a parser. The parsers convert one
+# NDJSON line into a (event, data) tuple, where event is one of the
+# 8 spec §3 event types and data is the event-specific payload dict.
+#
+# When stream_format is None or unknown, we fall back to `_ndjson_passthrough`
+# which accepts any NDJSON line with a "type" or "event" field and
+# broadcasts it as-is. This is the "generic NDJSON" path that
+# custom tools (e.g. a custom test-runner script) can use without
+# registering a specific stream_format.
+_STREAM_PARSERS: dict[str, str] = {
+    "claude-stream-json": "_ndjson_from_claude",
+    "codex-stream-json": "_ndjson_from_codex",
+}
+
+
+def _ndjson_passthrough(line: dict) -> tuple[str, dict]:
+    """Generic NDJSON → (event, data) for tools without a known stream_format.
+
+    Accepts:
+      - {"type": "<event>", ...data} → (type, data)  (claude style)
+      - {"event": "<event>", ...data} → (event, data)  (our style)
+      - {"msg": "<text>"} → ("output", {"text": msg, "is_final": False})
+
+    The result always fits the spec §3 event-type vocabulary. Unknown
+    event types are coerced to "output" with the whole dict as data.
+    """
+    if not isinstance(line, dict):
+        return ("output", {"text": str(line), "is_final": False})
+    # Prefer "type" (claude/codex style), fall back to "event" (ours)
+    ev = line.get("type") or line.get("event") or "output"
+    if ev not in EVENT_TYPES:
+        ev = "output"
+    data = {k: v for k, v in line.items() if k not in ("type", "event")}
+    return (ev, data)
+
+
+def _ndjson_from_claude(line: dict) -> tuple[str, dict]:
+    """Parse one line of claude-code's stream-json output.
+
+    Claude's stream-json format (per Anthropic's CLI docs):
+      {"type": "content_block_start", ...}
+      {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
+      {"type": "content_block_stop", ...}
+      {"type": "message_start", ...}
+      {"type": "message_delta", "delta": {"stop_reason": "..."}}
+      {"type": "message_stop", ...}
+      {"type": "tool_use", "name": "Bash", "input": {...}}
+
+    We map:
+      - content_block_delta with text_delta → ("output", {text, is_final=False})
+      - tool_use → ("tool_call", {tool_name, args})
+      - message_stop → ("done", {status: "success"})
+      - other → ("thinking", {text: "<the line as text>"})
+    """
+    if not isinstance(line, dict):
+        return _ndjson_passthrough(line)
+    t = line.get("type", "")
+    if t == "content_block_delta":
+        delta = line.get("delta") or {}
+        if delta.get("type") == "text_delta":
+            return ("output", {
+                "text": delta.get("text", ""),
+                "is_final": False,
+            })
+        return ("thinking", {"text": json.dumps(line)})
+    if t == "tool_use":
+        return ("tool_call", {
+            "tool_name": line.get("name", "unknown"),
+            "args": line.get("input") or {},
+            "duration_ms": 0,
+            "result": None,
+        })
+    if t == "message_stop":
+        return ("done", {
+            "status": "success",
+            "stop_reason": (line.get("message") or {}).get("stop_reason"),
+        })
+    if t == "error":
+        return ("error", {
+            "message": line.get("error", {}).get("message", str(line)),
+            "recoverable": False,
+        })
+    # Default: thinking
+    return ("thinking", {"text": json.dumps(line)})
+
+
+def _ndjson_from_codex(line: dict) -> tuple[str, dict]:
+    """Parse one line of codex's stream-json output.
+
+    Codex's stream-json format (per OpenAI's CLI docs):
+      {"type": "thread.started", "thread_id": "..."}
+      {"type": "turn.started"}
+      {"type": "item.created", "item": {"type": "command_execution", "command": "..."}}
+      {"type": "item.updated", "item": {...}}
+      {"type": "item.completed", "item": {...}}
+      {"type": "turn.completed", "usage": {...}}
+
+    We map:
+      - item.created/updated/completed with command_execution → command_run
+      - turn.completed → done
+      - other → thinking
+    """
+    if not isinstance(line, dict):
+        return _ndjson_passthrough(line)
+    t = line.get("type", "")
+    if t == "turn.completed":
+        return ("done", {"status": "success"})
+    if t in ("item.created", "item.updated", "item.completed"):
+        item = line.get("item") or {}
+        item_type = item.get("type", "")
+        if item_type == "command_execution":
+            cmd = item.get("command") or ""
+            return ("command_run", {
+                "command": " ".join(cmd) if isinstance(cmd, list) else str(cmd),
+                "exit_code": item.get("exit_code"),
+                "stdout_preview": (item.get("output") or "")[:500],
+                "stderr_preview": "",
+                "duration_ms": item.get("duration_ms", 0),
+            })
+        if item_type == "file_edit":
+            return ("file_edit", {
+                "path": item.get("path", ""),
+                "diff_summary": item.get("diff", "")[:200],
+                "lines_changed": item.get("lines_changed", 0),
+            })
+        if item_type == "file_create":
+            return ("file_create", {
+                "path": item.get("path", ""),
+                "size_bytes": item.get("size_bytes", 0),
+            })
+        return ("thinking", {"text": json.dumps(line)})
+    if t in ("thread.started", "turn.started"):
+        return ("thinking", {"text": t})
+    if t == "error":
+        return ("error", {
+            "message": line.get("message", str(line)),
+            "recoverable": False,
+        })
+    return ("thinking", {"text": json.dumps(line)})
+
+
+def _ndjson_to_event(tool_reg: ToolRegistration, line: dict) -> "StreamEvent":
+    """Convert one parsed NDJSON line into a StreamEvent.
+
+    Selects the parser based on `tool_reg.stream_format`. If unset
+    or unknown, uses `_ndjson_passthrough` so any tool emitting NDJSON
+    with a "type" or "event" field just works.
+    """
+    fmt = tool_reg.stream_format
+    if fmt == "claude-stream-json":
+        event, data = _ndjson_from_claude(line)
+    elif fmt == "codex-stream-json":
+        event, data = _ndjson_from_codex(line)
+    else:
+        event, data = _ndjson_passthrough(line)
+    # ts is filled by the broadcast path; we still set it here so
+    # standalone uses (e.g. tests) have a reasonable timestamp.
+    from .live_stream import StreamEvent
+    from datetime import datetime, timezone
+    return StreamEvent(
+        ts=datetime.now(timezone.utc).isoformat(),
+        workflow_id="",  # filled by the caller
+        step_id="",      # filled by the caller
+        event=event,
+        data=data,
+    )
+
+
+async def _run_subprocess_stream(
+    tool_reg: ToolRegistration,
+    input_dict: dict,
+    timeout_s: float,
+    on_line,
+) -> tuple[int, str, str, float]:
+    """Async line-buffered subprocess invocation.
+
+    Returns (exit_code, accumulated_stdout, accumulated_stderr, duration).
+    For each line of stdout, calls `on_line(line: str)` — the caller
+    is responsible for parsing and broadcasting. The line is passed
+    WITHOUT the trailing newline.
+
+    Differs from _run_subprocess:
+      - Uses asyncio.create_subprocess_exec (not subprocess.run)
+      - Reads stdout line-by-line via streams[0].readline() (not capture)
+      - Honors the same timeout via asyncio.wait_for
+      - Returns the full accumulated stdout/stderr (so the caller can
+        also parse the final state for the `parsed` field in the result)
+
+    Errors (binary not found, timeout) map to the same exceptions as
+    _run_subprocess — CliToolNotFoundError, CliToolTimeoutError. This
+    keeps the engine's _exec_cli_tool error handling uniform.
+    """
+    import asyncio
+    prompt = input_dict.get("prompt", "")
+    working_dir = input_dict.get("working_dir", os.getcwd())
+    extra_env = input_dict.get("env", {}) or {}
+    session_id = input_dict.get("session_id")
+    resume = bool(input_dict.get("resume", False))
+
+    env = dict(os.environ)
+    env.update(tool_reg.env)
+    env.update(extra_env)
+
+    substitutions = {
+        "prompt": prompt,
+        "working_dir": working_dir,
+        "session_id": session_id or "",
+    }
+    args = _substitute_template(tool_reg.args_template, substitutions)
+    if resume and session_id and tool_reg.session_id_flag:
+        args = [tool_reg.session_id_flag, session_id] + args
+
+    stdin_payload: Optional[str] = None
+    if tool_reg.stdin_prompt:
+        stdin_payload = prompt
+
+    started = time.monotonic()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            tool_reg.command, *args,
+            cwd=working_dir,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE if stdin_payload else None,
+        )
+    except FileNotFoundError as e:
+        raise CliToolNotFoundError(
+            f"tool {tool_reg.name!r} binary not found: {tool_reg.command!r}. "
+            f"Check that the tool is installed and on $PATH."
+        ) from e
+
+    # Write stdin if needed, then close it so the subprocess can read EOF.
+    if stdin_payload is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(stdin_payload.encode("utf-8"))
+        finally:
+            proc.stdin.close()
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    async def drain(stream, sink):
+        """Read one stream line-by-line, accumulate, call on_line per line."""
+        if stream is None:
+            return
+        while True:
+            raw = await stream.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            sink.append(line)
+            try:
+                on_line(line)
+            except Exception as e:  # don't let one bad line kill the run
+                LOG.debug(f"on_line handler raised: {e}")
+
+    try:
+        # Wait for both streams to drain + the process to exit, all
+        # bounded by the overall timeout. If timeout fires, kill the
+        # process and raise.
+        await asyncio.wait_for(
+            asyncio.gather(
+                drain(proc.stdout, stdout_chunks),
+                drain(proc.stderr, stderr_chunks),
+                proc.wait(),
+            ),
+            timeout=timeout_s,
+        )
+        exit_code = await proc.wait()
+    except asyncio.TimeoutError as e:
+        proc.kill()
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        duration = time.monotonic() - started
+        raise CliToolTimeoutError(
+            f"tool {tool_reg.name!r} timed out after {timeout_s}s"
+        ) from e
+
+    duration = time.monotonic() - started
+    return (exit_code, "\n".join(stdout_chunks), "\n".join(stderr_chunks), duration)
+
+
+def _run_cli_tool_streaming(
+    tool_reg: ToolRegistration,
+    input_dict: dict,
+    on_error: dict,
+    timeout_s: float,
+    *,
+    live_stream,
+    workflow_id: str,
+    step_id: str,
+    host: str,
+    port: int,
+    max_attempts: int,
+    backoff: str,
+    backoff_base_seconds: float,
+) -> dict:
+    """Sync wrapper around the async streaming path.
+
+    Called from the synchronous `run_cli_tool` (which is itself
+    called from the engine via run_in_executor on a thread). We
+    need an event loop to drive the async streaming coroutine.
+    Strategy: try to use the running loop if there is one
+    (`asyncio.get_running_loop`); if not, create a fresh one via
+    `asyncio.new_event_loop()` and tear it down on exit. The
+    latter case is the common one for engine-orchestrated runs.
+    """
+    import asyncio
+    from .live_stream import StreamEvent, stream_url
+
+    url = stream_url(host, port, workflow_id, step_id)
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        # Each attempt gets a fresh per-step list of events for
+        # the final `parsed` aggregation. Per-line events flow to
+        # the live_stream live; the aggregated list is the final
+        # result (mirrors how _parse_output collects text).
+        collected_events: list[StreamEvent] = []
+
+        def on_line(line: str) -> None:
+            """Parse one NDJSON line, broadcast it, append to collected."""
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                # Not NDJSON — treat as a thinking event so the GUI
+                # sees raw output even if the tool forgot to format
+                # it. Per spec §3 "thinking" is between-tool-calls.
+                ev = StreamEvent.now(
+                    workflow_id, step_id, "thinking",
+                    {"text": line},
+                )
+            else:
+                ev = _ndjson_to_event(tool_reg, obj)
+                # Re-stamp the workflow/step ids (the parser returns
+                # empty strings; the broadcast path needs them).
+                ev.workflow_id = workflow_id
+                ev.step_id = step_id
+            collected_events.append(ev)
+            # Schedule broadcast on the loop. We can't await here
+            # (on_line is sync), so use broadcast_sync which handles
+            # the no-loop case gracefully.
+            live_stream.broadcast_sync(ev)
+
+        try:
+            # Drive the async streaming coroutine. We use a fresh
+            # event loop if there isn't one already running on this
+            # thread (the common case — run_cli_tool is called from
+            # run_in_executor, which is a worker thread).
+            try:
+                asyncio.get_running_loop()
+                # If we get here, we're inside an async context. We
+                # can't `await` (we're sync), so fall through to the
+                # new-loop path.
+                own_loop = True
+            except RuntimeError:
+                own_loop = False
+
+            if own_loop:
+                # Shouldn't happen in practice — run_in_executor runs
+                # on a thread without a loop. If it does, we'd need
+                # nest_asyncio or similar. For now, raise a clear
+                # error so the bug is obvious.
+                raise CliToolError(
+                    "run_cli_tool_streaming called from inside a running "
+                    "event loop; this is a bug (the streaming path "
+                    "requires a fresh loop)"
+                )
+
+            loop = asyncio.new_event_loop()
+            try:
+                exit_code, stdout, stderr, duration = loop.run_until_complete(
+                    _run_subprocess_stream(tool_reg, input_dict, timeout_s, on_line)
+                )
+            finally:
+                loop.close()
+
+            if exit_code == 0:
+                # Build the parsed field from collected events. For
+                # stream-json output_format, we use the event list
+                # itself (the spec asks for "streamed events", not
+                # a final JSON object). For text/json, the captured
+                # stdout is the source of truth.
+                if tool_reg.output_format == "stream-json":
+                    parsed = {
+                        "events": [e.to_json() for e in collected_events],
+                        "streamed": True,
+                    }
+                elif tool_reg.output_format == "json":
+                    try:
+                        parsed = json.loads(stdout) if stdout.strip() else {}
+                    except json.JSONDecodeError as e:
+                        raise CliToolError(
+                            f"tool output is not valid JSON: {e}. "
+                            f"First 200 chars: {stdout[:200]!r}"
+                        ) from e
+                else:
+                    parsed = {"text": stdout}
+
+                return {
+                    "status": "success",
+                    "exit_code": exit_code,
+                    "duration_seconds": duration,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "parsed": parsed,
+                    "stream_url": url,
+                    "tool_metadata": {
+                        "tool": tool_reg.name,
+                        "command": tool_reg.command,
+                        "attempts": attempt,
+                        "streamed": True,
+                    },
+                }
+
+            LOG.warning(
+                f"tool {tool_reg.name!r} attempt {attempt}/{max_attempts} "
+                f"failed with exit_code={exit_code}: stderr={stderr[:200]!r}"
+            )
+            last_error = CliToolError(
+                f"tool {tool_reg.name!r} exited with code {exit_code}: {stderr[:500]}"
+            )
+        except (CliToolTimeoutError, CliToolNotFoundError) as e:
+            raise
+
+        # Backoff (same semantics as the sync path)
+        if attempt < max_attempts:
+            if backoff == "fixed":
+                time.sleep(backoff_base_seconds)
+            elif backoff == "exponential":
+                time.sleep(backoff_base_seconds * (2 ** (attempt - 1)))
+
+    final_failure = on_error.get("on_final_failure", "fail_workflow")
+    if final_failure == "escalate_hermes":
+        LOG.error(
+            f"tool {tool_reg.name!r} exhausted {max_attempts} attempts; "
+            f"escalating to Hermes"
+        )
+    else:
+        LOG.error(
+            f"tool {tool_reg.name!r} exhausted {max_attempts} attempts; "
+            f"workflow will be marked failed"
+        )
+    raise last_error or CliToolError(
+        f"tool {tool_reg.name!r} failed after {max_attempts} attempts"
+    )
+
+
+# Resolve the forward reference: cli_tool imports from live_stream at
+# the bottom of this module to avoid a circular import (live_stream
+# doesn't import cli_tool). The `from __future__ import annotations`
+# at the top of this file means the `Optional["LiveStreamServer"]`
+# hint in run_cli_tool's signature is never evaluated, so this
+# import is just for the type-checking convenience.
+from .live_stream import LiveStreamServer  # noqa: E402
