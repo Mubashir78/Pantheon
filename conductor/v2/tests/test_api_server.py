@@ -169,6 +169,207 @@ class TestApiServerAuth(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
 
 
+class TestApiServerAuthEnvFallback(unittest.TestCase):
+    """Env-var fallback: empty api_key arg must NOT disable auth when
+    CONDUCTOR_API_KEY is set in the environment (Ponytail Tier-2
+    finding 2 on PR #35 — production deploys that use
+    `uvicorn conductor.v2.api_server:app` rely on the env var and
+    would have been unauthenticated by the old behavior)."""
+
+    def setUp(self):
+        self.tmp = cf.TmpConductor.create()
+        # Patch CONDUCTOR_API_KEY for the test (cleared in tearDown).
+        import os
+        self._prev_env = os.environ.get("CONDUCTOR_API_KEY")
+        os.environ["CONDUCTOR_API_KEY"] = "env-key-456"
+        # Note: we do NOT set CONDUCTOR_WS_API_KEY so the test only
+        # exercises the canonical env var (spec §6).
+        from v2.auth import set_expected_api_key
+        # Reset the module-level binding so the env-var resolver
+        # takes over (the previous test may have set a different
+        # key via make_app's api_key arg).
+        set_expected_api_key(None)
+        self.app = make_app(
+            workflows_dir=self.tmp.workflows_dir,
+            state_dir=self.tmp.state_dir,
+            # api_key="" (the default) — falls through to env var
+        )
+        from fastapi.testclient import TestClient
+        self.client = TestClient(self.app)
+
+    def tearDown(self):
+        import os
+        if self._prev_env is None:
+            os.environ.pop("CONDUCTOR_API_KEY", None)
+        else:
+            os.environ["CONDUCTOR_API_KEY"] = self._prev_env
+        from v2.auth import set_expected_api_key
+        set_expected_api_key(None)
+        self.tmp.cleanup()
+
+    def test_env_key_is_accepted_when_arg_is_empty(self):
+        # The env-var resolver should pick up CONDUCTOR_API_KEY even
+        # when make_app() was called with api_key="" (the default).
+        r = self.client.get(
+            "/api/workflows",
+            headers=_auth_headers("env-key-456"),
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_wrong_key_rejected_when_env_fallback_active(self):
+        # Wrong token still 403, not 200 — auth is enforced.
+        r = self.client.get(
+            "/api/workflows",
+            headers=_auth_headers("not-the-env-key"),
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_no_token_rejected_when_env_fallback_active(self):
+        # No token at all → 401, not 200.
+        r = self.client.get("/api/workflows")
+        self.assertEqual(r.status_code, 401)
+
+    def test_health_still_unauthenticated_with_env_key(self):
+        # /health is the load-balancer probe — must NOT require auth
+        # even when env-key is set.
+        r = self.client.get("/health")
+        self.assertEqual(r.status_code, 200)
+
+
+class TestApiServerAuthEnvFile(unittest.TestCase):
+    """Fallback to CONDUCTOR_API_KEY from the operator's .env file
+    (~/.hermes/.env or ~/pantheon/conductor/v2/.env) when the process
+    env doesn't have it set. Lets the operator set the key once in
+    their global hermes config and have the conductor daemon pick it
+    up without an explicit `export` at startup.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        # Build a fake "~/.hermes/.env" in a tmp dir by monkey-patching
+        # `_HERMES_ENV_CANDIDATES`. We DON'T write to the real
+        # ~/.hermes/.env (that would be rude to the operator's real
+        # config and could break the next test run if the process
+        # crashes between write and cleanup).
+        self._tmp_home = Path(tempfile.mkdtemp(prefix="conductor_auth_test_"))
+        self._fake_hermes_dir = self._tmp_home / ".hermes"
+        self._fake_hermes_dir.mkdir()
+        self._env_file = self._fake_hermes_dir / ".env"
+        self._env_file.write_text(
+            "# Operator's hermes env file (test fixture)\n"
+            "SOME_OTHER_KEY=ignored\n"
+            "CONDUCTOR_API_KEY=file-key-789\n"
+            "TAILSCALE_ACME_DNS=ignored\n",
+            encoding="utf-8",
+        )
+
+        # Strip the process env so the file fallback is the only
+        # source of the key. The helper is cached, so we clear its
+        # cache after patching the candidate path.
+        self._prev_api = os.environ.pop("CONDUCTOR_API_KEY", None)
+        self._prev_ws_api = os.environ.pop("CONDUCTOR_WS_API_KEY", None)
+
+        # Patch the candidate list to point at our tmp .env.
+        # The test file imports `v2.api_server` (so the test runner
+        # sees `v2` as a package); the auth module is `v2.auth`.
+        from v2 import auth as auth_mod
+        self._real_candidates = auth_mod._HERMES_ENV_CANDIDATES
+        auth_mod._HERMES_ENV_CANDIDATES = (self._env_file,)
+        auth_mod._read_env_file.cache_clear()
+        self._auth = auth_mod
+
+        # Set up an app with api_key="" (default) — should fall through
+        # to the .env file and pick up "file-key-789".
+        cf_tmp = cf.TmpConductor.create()
+        self.tmp = cf_tmp
+        from v2.auth import set_expected_api_key
+        set_expected_api_key(None)
+        self.app = make_app(
+            workflows_dir=cf_tmp.workflows_dir,
+            state_dir=cf_tmp.state_dir,
+            api_key="",  # default — falls through to file
+        )
+        from fastapi.testclient import TestClient
+        self.client = TestClient(self.app)
+
+    def tearDown(self):
+        import os
+        # Restore the real candidate list and env state.
+        if self._prev_api is not None:
+            os.environ["CONDUCTOR_API_KEY"] = self._prev_api
+        if self._prev_ws_api is not None:
+            os.environ["CONDUCTOR_WS_API_KEY"] = self._prev_ws_api
+        self._auth._HERMES_ENV_CANDIDATES = self._real_candidates
+        self._auth._read_env_file.cache_clear()
+        self._auth.set_expected_api_key(None)
+        self.tmp.cleanup()
+        import shutil
+        shutil.rmtree(self._tmp_home, ignore_errors=True)
+
+    def test_file_key_is_accepted_when_arg_and_env_empty(self):
+        # CONDUCTOR_API_KEY=file-key-789 in the .env file, api_key=""
+        # (default), no process env. The auth resolver should pick up
+        # the file value.
+        r = self.client.get(
+            "/api/workflows",
+            headers=_auth_headers("file-key-789"),
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_wrong_key_rejected_when_file_fallback_active(self):
+        # Wrong token → 403, not 200 — auth is enforced via the file.
+        r = self.client.get(
+            "/api/workflows",
+            headers=_auth_headers("not-the-file-key"),
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_no_token_rejected_when_file_fallback_active(self):
+        # No token at all → 401, not 200. The file is set, so auth is on.
+        r = self.client.get("/api/workflows")
+        self.assertEqual(r.status_code, 401)
+
+    def test_legacy_alias_in_file_also_works(self):
+        # CONDUCTOR_WS_API_KEY= in the file should also be picked up
+        # (the legacy alias is honored the same as the canonical name).
+        # Rewrite the env file to use only the legacy alias.
+        self._env_file.write_text(
+            "CONDUCTOR_WS_API_KEY=legacy-file-key-000\n",
+            encoding="utf-8",
+        )
+        # Clear the lru_cache so the rewrite is seen.
+        self._auth._read_env_file.cache_clear()
+        r = self.client.get(
+            "/api/workflows",
+            headers=_auth_headers("legacy-file-key-000"),
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_process_env_wins_over_file(self):
+        # Even when the .env file has a key, a process env value
+        # should take precedence (lets CI and tests override without
+        # touching the operator's config).
+        import os
+        os.environ["CONDUCTOR_API_KEY"] = "proc-env-key-111"
+        try:
+            r = self.client.get(
+                "/api/workflows",
+                headers=_auth_headers("proc-env-key-111"),
+            )
+            self.assertEqual(r.status_code, 200)
+            # The file value should NOT work now.
+            r2 = self.client.get(
+                "/api/workflows",
+                headers=_auth_headers("file-key-789"),
+            )
+            self.assertEqual(r2.status_code, 403)
+        finally:
+            os.environ.pop("CONDUCTOR_API_KEY", None)
+
+
 class TestListAndGetWorkflows(unittest.TestCase):
     """GET /api/workflows and GET /api/workflows/{id}."""
 

@@ -260,14 +260,25 @@ def make_app(
         validate but run/SSE return 503.
     api_key
         Bearer token expected on every protected route. Empty string
-        disables auth (dev/test mode, same footgun as live_stream).
+        (the default) does NOT disable auth — it falls through to
+        env-var resolution (CONDUCTOR_API_KEY, then CONDUCTOR_WS_API_KEY).
+        Pass an explicit non-empty string to override the env var; pass
+        the literal sentinel value `""` only via the `disable_auth=True`
+        shortcut (see below). The empty-string override used to
+        force-disable auth even when CONDUCTOR_API_KEY was set in
+        production — a security gap (Ponytail Tier-2 finding 2 on
+        PR #35). The fix is to bind None for the empty case so
+        `_expected_for_request()` falls through to `resolve_api_key()`
+        which honors the env var.
     """
-    # Bind the expected key. An explicit arg always wins, even
-    # when it's the empty string (which means 'auth disabled' in
-    # dev/test mode). The empty-string override matters because the
-    # env may have CONDUCTOR_API_KEY set (production-like) while a
-    # test wants the dev path.
-    set_expected_api_key(api_key)
+    # Bind the expected key. An explicit non-empty arg wins over the
+    # env var (intentional — tests pass a known key, deployments
+    # leave the arg empty and rely on CONDUCTOR_API_KEY). An empty
+    # arg binds None so the env-var resolver takes over; this is
+    # what protects production deploys with `uvicorn conductor.v2.api_server:app`
+    # + CONDUCTOR_API_KEY set in ~/.hermes/.env from accidentally
+    # running unauthenticated.
+    set_expected_api_key(api_key if api_key else None)
 
     wf_dir = workflows_dir if workflows_dir is not None else _workflows_dir()
     st_dir = state_dir if state_dir is not None else _state_dir()

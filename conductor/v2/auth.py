@@ -26,8 +26,10 @@ do constant-time comparison at request time.
 """
 from __future__ import annotations
 
+import functools
 import hmac
 import os
+from pathlib import Path
 from typing import Optional
 
 # Header / query key the client sends. Spec §6 picks `Authorization:
@@ -46,22 +48,117 @@ QUERY_KEY = "api_key"
 API_KEY_ENV = "CONDUCTOR_API_KEY"
 LEGACY_WS_API_KEY_ENV = "CONDUCTOR_WS_API_KEY"
 
+# Operator's global hermes env file. We read this when the process env
+# doesn't have the key set, so the operator can put CONDUCTOR_API_KEY
+# in their global hermes config and the conductor daemon picks it up
+# without an explicit `export`. The first candidate that exists wins;
+# the others are skipped. Per-process env (os.environ) always wins
+# over the file — that way `CONDUCTOR_API_KEY=... uvicorn ...` still
+# works in CI and tests.
+_HERMES_ENV_CANDIDATES = (
+    Path.home() / ".hermes" / ".env",
+    Path.home() / "pantheon" / "conductor" / "v2" / ".env",
+)
+
+
+def _parse_env_line(line: str) -> Optional[tuple[str, str]]:
+    """Parse a single `KEY=value` line from a .env file.
+
+    Returns (key, value) on success, None on blank/comment lines.
+    Strips optional surrounding quotes (single or double) from the
+    value. Trailing `# comments` are NOT stripped (a value with a `#`
+    in it would survive — this matches bash/dotenv semantics closely
+    enough for our use case, which is `KEY=long-random-hex` lines).
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if "=" not in stripped:
+        return None
+    key, _, value = stripped.partition("=")
+    key = key.strip()
+    value = value.strip()
+    # Strip surrounding quotes if present (the only kind of value the
+    # operator is likely to put a quote in is a quoted token).
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    if not key:
+        return None
+    return key, value
+
+
+@functools.lru_cache(maxsize=1)
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Read a .env file and return its key/value pairs as a dict.
+
+    Missing or unreadable file → empty dict (not an error; the caller
+    falls through to the next candidate). Cached for the life of the
+    process so we don't re-parse on every request; the operator
+    restarts the daemon to pick up edits. Raises nothing.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        parsed = _parse_env_line(line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        out[key] = value
+    return out
+
+
+def _read_hermes_api_key() -> str:
+    """Return CONDUCTOR_API_KEY (or the legacy alias) from the first
+    operator .env file we can find. Returns "" when neither file has
+    the key set — callers fall through to the dev-mode disabled path.
+    """
+    for candidate in _HERMES_ENV_CANDIDATES:
+        env = _read_env_file(candidate)
+        if not env:
+            continue
+        # Prefer the canonical name; fall back to the legacy alias so
+        # existing operator config keeps working.
+        key = env.get(API_KEY_ENV) or env.get(LEGACY_WS_API_KEY_ENV, "")
+        if key:
+            return key
+    return ""
+
 
 def resolve_api_key(explicit: Optional[str] = None) -> str:
     """Return the configured API key, honoring the resolution order:
 
       1. Explicit argument (used by tests, which pass a known key).
-      2. ``CONDUCTOR_API_KEY`` env var (canonical name per spec §6).
-      3. ``CONDUCTOR_WS_API_KEY`` env var (legacy alias for the live
-         stream — kept for back-compat with existing operator config).
-      4. Empty string (auth disabled — dev/test mode).
+      2. ``CONDUCTOR_API_KEY`` process env var (canonical name per
+         spec §6). Wins over the .env file so a one-off
+         ``CONDUCTOR_API_KEY=... uvicorn ...`` still works in CI.
+      3. ``CONDUCTOR_WS_API_KEY`` process env var (legacy alias for
+         the live stream — kept for back-compat with existing
+         operator config).
+      4. ``CONDUCTOR_API_KEY`` from ``~/.hermes/.env`` (operator's
+         global hermes env file). Lets the operator set the key once
+         in their global hermes config and have the conductor daemon
+         pick it up without an explicit `export` at startup.
+      5. ``CONDUCTOR_WS_API_KEY`` from the same .env file (legacy
+         alias, same reasoning as step 3).
+      6. ``~/pantheon/conductor/v2/.env`` — the conductor's local
+         env file, checked as a defensive fallback for operators who
+         keep conductor-specific config in a sub-directory.
+      7. Empty string (auth disabled — dev/test mode).
 
     Returns the empty string when no key is configured. Callers should
     log a warning when starting in that state (the live_stream does).
     """
     if explicit is not None:
         return explicit
-    return os.environ.get(API_KEY_ENV) or os.environ.get(LEGACY_WS_API_KEY_ENV, "")
+    # Process env wins over the .env file (steps 2-3 over 4-6).
+    proc = os.environ.get(API_KEY_ENV) or os.environ.get(LEGACY_WS_API_KEY_ENV, "")
+    if proc:
+        return proc
+    # File fallback (steps 4-6, collapsed into the helper).
+    return _read_hermes_api_key()
 
 
 def _extract_bearer_token(authorization_header: Optional[str], query_key: Optional[str]) -> str:
