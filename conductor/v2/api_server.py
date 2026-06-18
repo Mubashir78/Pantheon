@@ -69,7 +69,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .auth import bearer_dependency, set_expected_api_key
+from .auth import bearer_dependency, resolve_api_key, set_expected_api_key
 from .engine import (
     ConductorEngine,
     Workflow,
@@ -280,6 +280,15 @@ def make_app(
     # running unauthenticated.
     set_expected_api_key(api_key if api_key else None)
 
+    # Resolve the EFFECTIVE auth state once so /health can report it
+    # honestly. The local `api_key` arg is misleading: when it's the
+    # default `""` but CONDUCTOR_API_KEY is configured (env or .env),
+    # the routes ARE enforcing auth — but the previous health
+    # endpoint claimed "DISABLED". Resolve via the shared helper so
+    # the report matches what the routes actually enforce.
+    from .auth import resolve_api_key
+    effective_api_key = resolve_api_key(api_key if api_key else None)
+
     wf_dir = workflows_dir if workflows_dir is not None else _workflows_dir()
     st_dir = state_dir if state_dir is not None else _state_dir()
     # Ensure both dirs exist so the first PUT/GET doesn't 500.
@@ -307,6 +316,13 @@ def make_app(
             return None
         return engine.live_stream
 
+    # Resolve the effective API key once so the /health endpoint
+    # reports the actual auth state after env-var and .env file
+    # fallback — not just whether the make_app api_key argument
+    # was explicitly set to a truthy value. Uses the same
+    # resolution chain as _expected_for_request().
+    _effective_key = resolve_api_key(api_key if api_key else None)
+
     # ----- /health (unauthenticated, for liveness probes) -----
 
     @app.get("/health")
@@ -318,7 +334,7 @@ def make_app(
             "state_dir": str(st_dir),
             "engine_wired": engine is not None,
             "live_stream_wired": _live_stream() is not None,
-            "auth": "required" if api_key else "DISABLED",
+            "auth": "required" if _effective_key else "DISABLED",
             "timestamp": utc_now(),
         }
 
@@ -878,9 +894,10 @@ class APIServer:
             await asyncio.sleep(0.1)
             if self._server.started:
                 break
+        _effective = resolve_api_key(self.api_key if self.api_key else None)
         LOG.info(
             f"api server listening on http://{self.host}:{self.port} "
-            f"(auth: {'required' if self.api_key else 'DISABLED'})"
+            f"(auth: {'required' if _effective else 'DISABLED'})"
         )
         return {
             "status": "started",

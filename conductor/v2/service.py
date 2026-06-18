@@ -37,6 +37,7 @@ from .gateway import GatewayClient, GatewayConfig
 from .nats import NATSListener
 from .webhook import WebhookServer, DEFAULT_PORT as DEFAULT_WEBHOOK_PORT
 from .api_server import APIServer, DEFAULT_PORT as DEFAULT_API_PORT
+from .auth import resolve_api_key
 from .delivery import DeliveryRouter
 from .cron_scheduler import CronScheduler
 
@@ -125,10 +126,14 @@ class ConductorService:
         self.enable_api = enable_api
         self.api_port = api_port
         # Shared bearer token across the three HTTP surfaces
-        # (api_server, webhook, live_stream). Read from env if not
-        # passed explicitly so a production daemon with
-        # CONDUCTOR_API_KEY in ~/.hermes/.env gets auth on by default.
-        self.api_key = api_key or os.environ.get("CONDUCTOR_API_KEY", "")
+        # (api_server, webhook, live_stream). Uses the canonical
+        # resolve_api_key() helper so the .env file fallback
+        # (~/.hermes/.env, ~/pantheon/conductor/v2/.env) is honored
+        # the same way as the direct FastAPI/live_stream paths.
+        # Passing an explicit non-empty key (tests) still wins over
+        # the env; passing None or "" falls through to the full
+        # resolution chain.
+        self.api_key = resolve_api_key(api_key if api_key else None)
         # cron_tick_interval=None -> use the CronScheduler default (30s).
         # Tests pass 1.0 (or 0.1 for ultra-fast) to avoid waiting half a
         # minute per assertion.

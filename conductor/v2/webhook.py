@@ -53,12 +53,14 @@ def make_app(pending_dir: Path = PENDING_DIR, api_key: str = "") -> FastAPI:
       * ``POST /dispatch``         — AUTHENTICATED (internal callers
         like Talon send their own token).
     """
-    if api_key:
-        # Bind for the bearer_dependency() factory in auth.py.
-        # Module-level binding is fine here: each `make_app` call
-        # reflects the latest intent, and tests construct a fresh app
-        # per case.
-        set_expected_api_key(api_key)
+    # Bind the expected key for the bearer_dependency() factory in
+    # auth.py. Mirror the api_server fix: bind None for the empty
+    # case so the resolver (CONDUCTOR_API_KEY env, then .env file
+    # fallback) takes over. Otherwise an empty `api_key=""` would
+    # leave a stale binding from a previous make_app() call in
+    # place and silently enforce the wrong key (or no key, when
+    # the prior binding was None).
+    set_expected_api_key(api_key if api_key else None)
 
     inbox = pending_dir / "_webhooks"
     inbox.mkdir(parents=True, exist_ok=True)
